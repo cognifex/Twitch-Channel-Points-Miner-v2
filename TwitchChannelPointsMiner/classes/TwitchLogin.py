@@ -7,6 +7,7 @@ import getpass
 import logging
 import os
 import pickle
+import sys
 
 import browser_cookie3
 import requests
@@ -61,11 +62,19 @@ class TwitchLogin(object):
         use_backup_flow = False
 
         for attempt in range(0, 25):
-            password = (
-                getpass.getpass(f"Enter Twitch password for {self.username}: ")
-                if self.password in [None, ""]
-                else self.password
-            )
+            if self.password in [None, ""]:
+                try:
+                    password = getpass.getpass(
+                        f"Enter Twitch password for {self.username}: "
+                    )
+                except (EOFError, OSError):
+                    logger.error(
+                        "Interactive password prompt unavailable. "
+                        "Set the password in your run.py/docker config and retry."
+                    )
+                    return False
+            else:
+                password = self.password
 
             post_data["username"] = self.username
             post_data["password"] = password
@@ -138,8 +147,11 @@ class TwitchLogin(object):
                 break
 
         if use_backup_flow:
-            self.set_token(self.login_flow_backup())
-            return self.check_login()
+            backup_token = self.login_flow_backup()
+            if backup_token is not None:
+                self.set_token(backup_token)
+                return self.check_login()
+            return False
 
         return False
 
@@ -150,20 +162,41 @@ class TwitchLogin(object):
     def send_login_request(self, json_data):
         response = self.session.post("https://passport.twitch.tv/login", json=json_data)
 
-        try:
-            return response.json()
-        except requests.exceptions.JSONDecodeError:
+        content_type = response.headers.get("content-type", "")
+        if "json" not in content_type.lower():
             logger.warning(
                 "Unexpected non-JSON response from Twitch login endpoint "
                 "(status=%s, content_type=%s). Falling back to browser login flow.",
                 response.status_code,
-                response.headers.get("content-type", "unknown"),
+                content_type or "unknown",
             )
-            logger.debug("Raw Twitch login response (first 500 chars): %s", response.text[:500])
+            logger.debug(
+                "Raw Twitch login response (first 500 chars): %s", response.text[:500]
+            )
+            return {"error_code": 1000}
+
+        try:
+            return response.json()
+        except ValueError:
+            logger.warning(
+                "Twitch login endpoint returned invalid JSON (status=%s). "
+                "Falling back to browser login flow.",
+                response.status_code,
+            )
+            logger.debug(
+                "Raw Twitch login response (first 500 chars): %s", response.text[:500]
+            )
             return {"error_code": 1000}
 
     def login_flow_backup(self):
         """Backup OAuth login flow in case manual captcha solving is required"""
+        if not sys.stdin.isatty():
+            logger.error(
+                "CAPTCHA/Browser login is required, but no interactive TTY is available. "
+                "Skipping interactive fallback so the process can continue running."
+            )
+            return None
+
         browser = input(
             "What browser do you use? Chrome (1), Firefox (2), Other (3): "
         ).strip()
