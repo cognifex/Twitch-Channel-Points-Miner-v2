@@ -149,7 +149,18 @@ class TwitchLogin(object):
 
     def send_login_request(self, json_data):
         response = self.session.post("https://passport.twitch.tv/login", json=json_data)
-        return response.json()
+
+        try:
+            return response.json()
+        except requests.exceptions.JSONDecodeError:
+            logger.warning(
+                "Unexpected non-JSON response from Twitch login endpoint "
+                "(status=%s, content_type=%s). Falling back to browser login flow.",
+                response.status_code,
+                response.headers.get("content-type", "unknown"),
+            )
+            logger.debug("Raw Twitch login response (first 500 chars): %s", response.text[:500])
+            return {"error_code": 1000}
 
     def login_flow_backup(self):
         """Backup OAuth login flow in case manual captcha solving is required"""
