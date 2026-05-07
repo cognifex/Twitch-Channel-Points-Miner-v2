@@ -1,6 +1,9 @@
 services:
   miner:
-    image: ${MINER_IMAGE:-tkdalex/twitch-channel-points-miner-v2}
+    image: ${MINER_IMAGE:-twitch-channel-points-miner-v2:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: ${CONTAINER_NAME:-twitch-channel-points-miner}
     restart: unless-stopped
     stdin_open: true
