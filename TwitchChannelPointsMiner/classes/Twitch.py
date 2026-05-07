@@ -237,7 +237,14 @@ class Twitch(object):
             logger.debug(
                 f"Data: {json_data}, Status code: {response.status_code}, Content: {response.text}"
             )
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                logger.warning(
+                    "GQLOperations returned non-JSON response (status=%s). Returning empty payload.",
+                    response.status_code,
+                )
+                return {}
         except requests.exceptions.RequestException as e:
             logger.error(
                 f"Error with GQLOperations ({json_data['operationName']}): {e}"
