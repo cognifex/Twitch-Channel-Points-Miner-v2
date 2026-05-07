@@ -9,6 +9,11 @@ from typing import Any
 
 from flask import Flask, redirect, render_template_string, request, url_for
 
+import requests
+
+from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
+from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
+
 app = Flask(__name__)
 
 CONFIG_PATH = Path(os.getenv("WEBUI_CONFIG_PATH", "/data/config.json"))
@@ -30,6 +35,86 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "minimum_points": 0,
     },
 }
+
+
+
+LOGIN_TEST_TIMEOUT_SECONDS = int(os.getenv("WEBUI_LOGIN_TEST_TIMEOUT", "20"))
+LAST_LOGIN_TEST: dict[str, Any] = {
+    "ran_at": None,
+    "success": None,
+    "details": ["Noch kein Login-Test ausgeführt."],
+}
+
+
+def run_login_test(username: str, password: str) -> dict[str, Any]:
+    details: list[str] = []
+
+    if not username.strip() or not password:
+        return {
+            "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "success": False,
+            "details": ["Username und Passwort müssen gesetzt sein."],
+        }
+
+    login = TwitchLogin(CLIENT_ID, username.strip(), USER_AGENTS["Linux"]["CHROME"], password=password)
+    login.session.timeout = LOGIN_TEST_TIMEOUT_SECONDS
+
+    payload = {
+        "client_id": CLIENT_ID,
+        "undelete_user": False,
+        "remember_me": True,
+        "username": username.strip(),
+        "password": password,
+    }
+
+    try:
+        response = login.send_login_request(payload)
+        error_code = response.get("error_code")
+
+        if "access_token" in response:
+            details.append("Twitch Login-Endpoint hat ein Access Token geliefert.")
+            login.set_token(response["access_token"])
+            if login.check_login():
+                details.append("Token-Prüfung erfolgreich (User-ID konnte ermittelt werden).")
+                return {
+                    "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "success": True,
+                    "details": details,
+                }
+            details.append("Token erhalten, aber User-ID-Prüfung fehlgeschlagen.")
+            return {
+                "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "success": False,
+                "details": details,
+            }
+
+        error_map = {
+            3001: "Ungültiger Username oder Passwort.",
+            3003: "Ungültiger Username oder Passwort.",
+            3011: "2FA erforderlich: Authy-Token fehlt.",
+            3012: "2FA erforderlich: ungültiges Authy-Token.",
+            3022: "Login-Verifizierung erforderlich (E-Mail/Code).",
+            3023: "Login-Verifizierung fehlgeschlagen (Code ungültig).",
+            1000: "CAPTCHA/Browser-Verifizierung erforderlich.",
+        }
+        if error_code is not None:
+            details.append(f"Twitch Fehlercode: {error_code}")
+            details.append(error_map.get(error_code, "Unbekannter Login-Fehlercode von Twitch."))
+        else:
+            details.append("Login fehlgeschlagen: keine verwertbare Antwort vom Twitch-Endpoint.")
+
+        return {
+            "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "success": False,
+            "details": details,
+        }
+    except requests.RequestException as exc:
+        details.append(f"Netzwerkfehler beim Login-Test: {exc.__class__.__name__}")
+        return {
+            "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "success": False,
+            "details": details,
+        }
 
 
 def load_config() -> dict[str, Any]:
@@ -152,6 +237,22 @@ TEMPLATE = """
   </div>
 
   <div class="card">
+    <h2>Login-Test</h2>
+    <form method="post" action="{{ url_for('login_test') }}">
+      <button type="submit">Login testen</button>
+    </form>
+    <p class="meta">Letzter Test: {{ login_test.ran_at or 'Noch nie' }}</p>
+    <p>Ergebnis:
+      {% if login_test.success is sameas true %}<strong style="color:#7dff9a">Erfolgreich</strong>
+      {% elif login_test.success is sameas false %}<strong style="color:#ff7d7d">Fehlgeschlagen</strong>
+      {% else %}<strong style="color:#ffd77d">Nicht ausgeführt</strong>{% endif %}
+    </p>
+    <h3>Login-Test Log</h3>
+    <pre>{% for line in login_test.details %}{{ line }}
+{% endfor %}</pre>
+  </div>
+
+  <div class="card">
     <h2>Status</h2>
     <p>Login-Status:
       {% if runtime_status.login_failed %}<strong style="color:#ff7d7d">Fehlgeschlagen</strong>
@@ -198,6 +299,7 @@ def index() -> str:
         config_path=CONFIG_PATH,
         log_path=LOG_PATH,
         runtime_status=runtime_status,
+        login_test=LAST_LOGIN_TEST,
     )
 
 
@@ -217,6 +319,14 @@ def save() -> Any:
         },
     }
     save_config(config)
+    return redirect(url_for("index"))
+
+
+@app.post("/login-test")
+def login_test() -> Any:
+    config = load_config()
+    global LAST_LOGIN_TEST
+    LAST_LOGIN_TEST = run_login_test(config.get("username", ""), config.get("password", ""))
     return redirect(url_for("index"))
 
 
