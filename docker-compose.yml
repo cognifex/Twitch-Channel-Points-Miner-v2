@@ -12,7 +12,7 @@ services:
       - ${ANALYTICS_DIR:-./analytics}:/usr/src/app/analytics
       - ${COOKIES_DIR:-./cookies}:/usr/src/app/cookies
       - ${LOGS_DIR:-./logs}:/usr/src/app/logs
-      - ${RUN_FILE:-./run.py}:/usr/src/app/run.py:ro
+      - ${RUN_FILE:-./example.py}:/usr/src/app/run.py:ro
     ports:
       - "${ANALYTICS_PORT:-5000}:5000"
 
