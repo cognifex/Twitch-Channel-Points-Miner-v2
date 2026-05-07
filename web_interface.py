@@ -18,6 +18,8 @@ app = Flask(__name__)
 
 CONFIG_PATH = Path(os.getenv("WEBUI_CONFIG_PATH", "/data/config.json"))
 LOG_PATH = Path(os.getenv("WEBUI_LOG_PATH", "/data/logs/latest.log"))
+COOKIES_PATH = Path(os.getenv("WEBUI_COOKIES_PATH", "/data/cookies"))
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "username": "",
@@ -28,6 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "claim_drops": True,
     "watch_streak": True,
     "chat_presence": "ONLINE",
+    "proxy": "",
     "bet": {
         "strategy": "SMART",
         "percentage": 5,
@@ -45,8 +48,14 @@ LAST_LOGIN_TEST: dict[str, Any] = {
     "details": ["Noch kein Login-Test ausgeführt."],
 }
 
+LAST_COOKIE_IMPORT: dict[str, Any] = {
+    "ran_at": None,
+    "success": None,
+    "details": ["Noch kein Cookie-Import durchgeführt."],
+}
 
-def run_login_test(username: str, password: str) -> dict[str, Any]:
+
+def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, Any]:
     details: list[str] = []
 
     if not username.strip() or not password:
@@ -58,6 +67,9 @@ def run_login_test(username: str, password: str) -> dict[str, Any]:
 
     login = TwitchLogin(CLIENT_ID, username.strip(), USER_AGENTS["Linux"]["CHROME"], password=password)
     login.session.timeout = LOGIN_TEST_TIMEOUT_SECONDS
+    if proxy.strip():
+        login.session.proxies.update({"http": proxy.strip(), "https": proxy.strip()})
+        details.append("Proxy für Login-Test aktiv.")
 
     payload = {
         "client_id": CLIENT_ID,
@@ -115,6 +127,29 @@ def run_login_test(username: str, password: str) -> dict[str, Any]:
             "success": False,
             "details": details,
         }
+
+
+def _cookie_file_for_username(username: str) -> Path:
+    safe_username = re.sub(r"[^a-zA-Z0-9_.-]", "_", username.strip())
+    return COOKIES_PATH / f"{safe_username}.pkl"
+
+
+def save_manual_cookies(username: str, auth_token: str, persistent_id: str = "") -> tuple[bool, list[str]]:
+    details: list[str] = []
+    if not username.strip() or not auth_token.strip():
+        return False, ["Username und auth-token sind erforderlich, um Cookies zu speichern."]
+
+    twitch_login = TwitchLogin(CLIENT_ID, username.strip(), USER_AGENTS["Linux"]["CHROME"], password="")
+    twitch_login.token = auth_token.strip()
+    twitch_login.user_id = persistent_id.strip()
+
+    cookie_file = _cookie_file_for_username(username)
+    cookie_file.parent.mkdir(parents=True, exist_ok=True)
+    twitch_login.save_cookies(str(cookie_file))
+
+    details.append(f"Cookie-Datei gespeichert: {cookie_file}")
+    details.append("Hinweis: Die Datei wird beim nächsten Miner-Start automatisch genutzt.")
+    return True, details
 
 
 def load_config() -> dict[str, Any]:
@@ -198,6 +233,8 @@ TEMPLATE = """
       <input name="username" value="{{ config.get('username', '') }}">
       <label>Password</label>
       <input name="password" type="password" value="{{ config.get('password', '') }}">
+      <label>Proxy URL (optional, z. B. http://user:pass@host:port)</label>
+      <input name="proxy" value="{{ config.get('proxy', '') }}" placeholder="http://127.0.0.1:8080">
 
       <label>Streamer (kommagetrennt)</label>
       <input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
@@ -252,6 +289,27 @@ TEMPLATE = """
 {% endfor %}</pre>
   </div>
 
+
+  <div class="card">
+    <h2>Cookie-Import (Workaround bei Twitch Fehlercode 1000)</h2>
+    <p class="meta">Vorgehen: 1) Im normalen Browser bei Twitch anmelden und CAPTCHA lösen. 2) auth-token Cookie aus den DevTools kopieren. 3) Optional persistent Cookie ergänzen. 4) Hier speichern.</p>
+    <form method="post" action="{{ url_for('save_cookies') }}">
+      <label>auth-token</label>
+      <input name="auth_token" value="">
+      <label>persistent (optional User-ID)</label>
+      <input name="persistent" value="">
+      <button type="submit">Cookies speichern</button>
+    </form>
+    <p class="meta">Letzter Import: {{ cookie_import.ran_at or 'Noch nie' }}</p>
+    <p>Ergebnis:
+      {% if cookie_import.success is sameas true %}<strong style="color:#7dff9a">Erfolgreich</strong>
+      {% elif cookie_import.success is sameas false %}<strong style="color:#ff7d7d">Fehlgeschlagen</strong>
+      {% else %}<strong style="color:#ffd77d">Nicht ausgeführt</strong>{% endif %}
+    </p>
+    <pre>{% for line in cookie_import.details %}{{ line }}
+{% endfor %}</pre>
+  </div>
+
   <div class="card">
     <h2>Status</h2>
     <p>Login-Status:
@@ -300,6 +358,7 @@ def index() -> str:
         log_path=LOG_PATH,
         runtime_status=runtime_status,
         login_test=LAST_LOGIN_TEST,
+        cookie_import=LAST_COOKIE_IMPORT,
     )
 
 
@@ -311,6 +370,7 @@ def save() -> Any:
         "password": request.form.get("password", ""),
         "streamers": streamers,
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
+        "proxy": request.form.get("proxy", "").strip(),
         "bet": {
             "strategy": request.form.get("bet_strategy", "SMART"),
             "percentage": int(request.form.get("bet_percentage", 5)),
@@ -326,9 +386,26 @@ def save() -> Any:
 def login_test() -> Any:
     config = load_config()
     global LAST_LOGIN_TEST
-    LAST_LOGIN_TEST = run_login_test(config.get("username", ""), config.get("password", ""))
+    LAST_LOGIN_TEST = run_login_test(config.get("username", ""), config.get("password", ""), config.get("proxy", ""))
     return redirect(url_for("index"))
 
+
+@app.post("/save-cookies")
+def save_cookies() -> Any:
+    config = load_config()
+    username = config.get("username", "")
+    auth_token = request.form.get("auth_token", "")
+    persistent = request.form.get("persistent", "")
+
+    success, details = save_manual_cookies(username, auth_token, persistent)
+
+    global LAST_COOKIE_IMPORT
+    LAST_COOKIE_IMPORT = {
+        "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "success": success,
+        "details": details,
+    }
+    return redirect(url_for("index"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("WEBUI_PORT", "8080")), debug=False)
