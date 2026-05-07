@@ -643,3 +643,25 @@ Read more at [#92](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/is
 
 ## Disclaimer
 This project comes with no guarantee or warranty. You are responsible for whatever happens from using this project. It is possible to get soft or hard banned by using this project if you are not careful. This is a personal project and is in no way affiliated with Twitch.
+
+
+### Docker Compose + Webinterface
+
+`docker-compose.yml` enthält jetzt zwei Services:
+
+- `miner`: der eigentliche Twitch Channel Points Miner
+- `webui`: ein Flask-Webinterface zur Konfiguration und zum Monitoring
+
+Start:
+
+```bash
+docker compose up -d
+```
+
+Webinterface:
+
+- URL: `http://localhost:8080` (oder `${WEBUI_PORT}`)
+- Konfiguration wird in `./config.json` gespeichert
+- Log-Tail liest aus `./logs/latest.log`
+
+Hinweis: Das Webinterface schreibt **keine** `run.py` automatisch um, sondern pflegt eine separate `config.json`, die du für deine eigene `run.py` verwenden kannst.
