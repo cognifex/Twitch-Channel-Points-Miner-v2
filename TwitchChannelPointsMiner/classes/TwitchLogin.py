@@ -160,7 +160,16 @@ class TwitchLogin(object):
         self.session.headers.update({"Authorization": f"Bearer {self.token}"})
 
     def send_login_request(self, json_data):
-        response = self.session.post("https://passport.twitch.tv/login", json=json_data)
+        try:
+            response = self.session.post(
+                "https://passport.twitch.tv/login", json=json_data, timeout=30
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "Twitch login request failed (%s). Falling back to browser login flow.",
+                exc,
+            )
+            return {"error_code": 1000}
 
         content_type = response.headers.get("content-type", "")
         if "json" not in content_type.lower():
