@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+import re
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,31 @@ def read_log_tail(lines: int = 200) -> list[str]:
 
     return [line.rstrip("\n") for line in content[-lines:]]
 
+
+
+
+def extract_runtime_status(log_lines: list[str]) -> dict[str, Any]:
+    status = {"login_ok": False, "login_failed": False, "streamers": {}}
+
+    online_pattern = re.compile(r"Streamer\(username=([^,]+),.*\) is Online")
+    offline_pattern = re.compile(r"Streamer\(username=([^,]+),.*\) is Offline")
+
+    for line in log_lines:
+        lowered = line.lower()
+        if "start session" in lowered or "loading data for" in lowered:
+            status["login_ok"] = True
+        if "login" in lowered and ("fail" in lowered or "error" in lowered):
+            status["login_failed"] = True
+
+        online_match = online_pattern.search(line)
+        if online_match:
+            status["streamers"][online_match.group(1)] = "ONLINE"
+
+        offline_match = offline_pattern.search(line)
+        if offline_match:
+            status["streamers"][offline_match.group(1)] = "OFFLINE"
+
+    return status
 
 TEMPLATE = """
 <!doctype html>
@@ -126,6 +152,27 @@ TEMPLATE = """
   </div>
 
   <div class="card">
+    <h2>Status</h2>
+    <p>Login-Status:
+      {% if runtime_status.login_failed %}<strong style="color:#ff7d7d">Fehlgeschlagen</strong>
+      {% elif runtime_status.login_ok %}<strong style="color:#7dff9a">Erfolgreich gestartet</strong>
+      {% else %}<strong style="color:#ffd77d">Noch kein eindeutiger Login-Status</strong>{% endif %}
+    </p>
+    <h3>Streamer-Status</h3>
+    {% if runtime_status.streamers %}
+      <ul>
+      {% for streamer, state in runtime_status.streamers.items() %}
+        <li><strong>{{ streamer }}</strong>:
+          {% if state == 'ONLINE' %}<span style="color:#7dff9a">ONLINE</span>{% else %}<span style="color:#ffb86c">OFFLINE</span>{% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+    {% else %}
+      <p class="meta">Noch keine Streamer-Statusmeldungen in den Logs gefunden.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
     <h2>Monitoring (Live-Log Tail)</h2>
     <p><a href="{{ url_for('index') }}" style="color:#b9c4ff;">Aktualisieren</a></p>
     <pre>{% for line in logs %}{{ line }}
@@ -142,6 +189,7 @@ def index() -> str:
     config = load_config()
     logs = read_log_tail()
     saved_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    runtime_status = extract_runtime_status(logs)
     return render_template_string(
         TEMPLATE,
         config=config,
@@ -149,6 +197,7 @@ def index() -> str:
         saved_at=saved_at,
         config_path=CONFIG_PATH,
         log_path=LOG_PATH,
+        runtime_status=runtime_status,
     )
 
 

@@ -663,5 +663,6 @@ Webinterface:
 - URL: `http://localhost:8080` (oder `${WEBUI_PORT}`)
 - Konfiguration wird in `./config.json` gespeichert
 - Log-Tail liest aus `./logs/latest.log`
+- Login- und Streamer-Status werden aus den Log-Zeilen erkannt und im UI angezeigt
 
 Hinweis: Das Webinterface schreibt **keine** `run.py` automatisch um, sondern pflegt eine separate `config.json`, die du für deine eigene `run.py` verwenden kannst.
