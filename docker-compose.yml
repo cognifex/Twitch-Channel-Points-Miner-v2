@@ -25,13 +25,14 @@ services:
     restart: unless-stopped
     working_dir: /app
     command: >
-      sh -c "pip install --no-cache-dir flask requests && python /app/web_interface.py"
+      sh -c "pip install --no-cache-dir flask requests && python web_interface.py"
     environment:
+      PYTHONPATH: /app
       WEBUI_CONFIG_PATH: /data/config.json
       WEBUI_LOG_PATH: /data/logs/latest.log
       WEBUI_PORT: 8080
     volumes:
-      - ./web_interface.py:/app/web_interface.py:ro
+      - ./:/app:ro
       - ./:/data
     ports:
       - "${WEBUI_PORT:-8080}:8080"
