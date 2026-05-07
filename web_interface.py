@@ -66,7 +66,9 @@ def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, A
         }
 
     login = TwitchLogin(CLIENT_ID, username.strip(), USER_AGENTS["Linux"]["CHROME"], password=password)
-    login.session.timeout = LOGIN_TEST_TIMEOUT_SECONDS
+    details.append("Login-Test gestartet.")
+    details.append(f"Timeout: {LOGIN_TEST_TIMEOUT_SECONDS}s")
+
     if proxy.strip():
         login.session.proxies.update({"http": proxy.strip(), "https": proxy.strip()})
         details.append("Proxy für Login-Test aktiv.")
@@ -80,11 +82,31 @@ def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, A
     }
 
     try:
-        response = login.send_login_request(payload)
+        http_response = login.session.post(
+            "https://passport.twitch.tv/login",
+            json=payload,
+            timeout=LOGIN_TEST_TIMEOUT_SECONDS,
+        )
+        details.append(f"HTTP Status: {http_response.status_code}")
+        content_type = (http_response.headers.get("content-type") or "unknown").strip()
+        details.append(f"Content-Type: {content_type}")
+
+        if "json" not in content_type.lower():
+            details.append("Antwort ist kein JSON (häufig CAPTCHA/Challenge oder Block-Seite).")
+            preview = (http_response.text or "").strip()[:200]
+            if preview:
+                details.append(f"Body-Vorschau: {preview}")
+            return {
+                "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "success": False,
+                "details": details,
+            }
+
+        response = http_response.json()
         error_code = response.get("error_code")
 
         if "access_token" in response:
-            details.append("Twitch Login-Endpoint hat ein Access Token geliefert.")
+            details.append("Access Token erhalten.")
             login.set_token(response["access_token"])
             if login.check_login():
                 details.append("Token-Prüfung erfolgreich (User-ID konnte ermittelt werden).")
@@ -113,8 +135,15 @@ def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, A
             details.append(f"Twitch Fehlercode: {error_code}")
             details.append(error_map.get(error_code, "Unbekannter Login-Fehlercode von Twitch."))
         else:
-            details.append("Login fehlgeschlagen: keine verwertbare Antwort vom Twitch-Endpoint.")
+            details.append("Login fehlgeschlagen: JSON ohne access_token/error_code erhalten.")
 
+        return {
+            "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "success": False,
+            "details": details,
+        }
+    except ValueError:
+        details.append("JSON konnte nicht geparst werden (ungültige Antwort).")
         return {
             "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
             "success": False,
