@@ -68,6 +68,8 @@ class TwitchChannelPointsMiner:
         "original_streamers",
         "logs_file",
         "queue_listener",
+        "auto_login",
+        "prefer_token_login",
     ]
 
     def __init__(
@@ -75,6 +77,8 @@ class TwitchChannelPointsMiner:
         username: str,
         password: str = None,
         claim_drops_startup: bool = False,
+        auto_login: bool = True,
+        prefer_token_login: bool = False,
         # Settings for logging and selenium as you can see.
         priority: list = [Priority.STREAK, Priority.DROPS, Priority.ORDER],
         # This settings will be global shared trought Settings class
@@ -96,7 +100,15 @@ class TwitchChannelPointsMiner:
         Settings.streamer_settings = streamer_settings
 
         user_agent = get_user_agent("FIREFOX")
-        self.twitch = Twitch(self.username, user_agent, password)
+        self.auto_login = auto_login
+        self.prefer_token_login = prefer_token_login
+        self.twitch = Twitch(
+            self.username,
+            user_agent,
+            password,
+            auto_login=self.auto_login,
+            prefer_token_login=self.prefer_token_login,
+        )
 
         self.claim_drops_startup = claim_drops_startup
         self.priority = priority if isinstance(priority, list) else [priority]
