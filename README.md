@@ -504,6 +504,20 @@ Allowed values for `chat` are:
 - `ONLINE` Partecipate to IRC chat if the streamer is online (leave if offline)
 - `OFFLINE` Partecipate to IRC chat if the streamer is offline (leave if online)
 
+
+#### Optional: Chat Capture (PII-minimiert mit Re-Identifikation)
+Wenn du Chat-Nachrichten mitschneiden möchtest, kannst du eine pseudonymisierte JSONL-Datei plus verschlüsselte Mapping-Datei aktivieren.
+
+- `TWITCH_CHAT_CAPTURE_ENABLED=true` aktiviert die Aufzeichnung.
+- `TWITCH_CHAT_CAPTURE_SECRET=<strong-random-secret>` ist verpflichtend und dient sowohl für `user_hash` als auch für die Verschlüsselung der Mapping-Datei.
+- `TWITCH_CHAT_CAPTURE_DIR=chat_capture` (optional) setzt den Ausgabepfad.
+
+Ergebnis:
+- `events.jsonl` enthält nur `user_hash` (kein Klarname).
+- `user_mapping.enc` enthält die verschlüsselte Zuordnung `user_hash -> original_name` zur kontrollierten Wiederherstellung.
+
+> Hinweis: Für die Mapping-Verschlüsselung wird `cryptography` benötigt.
+
 ### BetSettings
 | Key                	| Type            	| Default 	| Description                                                                                                    	                                                                          |
 |--------------------	|-----------------	|---------	|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
