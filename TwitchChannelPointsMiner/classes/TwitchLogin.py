@@ -184,16 +184,25 @@ class TwitchLogin(object):
             )
             return {"error_code": 1000}
 
+        body = response.text.strip()
+        if not body:
+            logger.warning(
+                "Twitch login endpoint returned an empty body (status=%s). "
+                "Falling back to browser login flow.",
+                response.status_code,
+            )
+            return {"error_code": 1000}
+
         try:
             return response.json()
-        except ValueError:
+        except (ValueError, requests.exceptions.JSONDecodeError):
             logger.warning(
                 "Twitch login endpoint returned invalid JSON (status=%s). "
                 "Falling back to browser login flow.",
                 response.status_code,
             )
             logger.debug(
-                "Raw Twitch login response (first 500 chars): %s", response.text[:500]
+                "Raw Twitch login response (first 500 chars): %s", body[:500]
             )
             return {"error_code": 1000}
 
