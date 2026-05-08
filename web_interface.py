@@ -94,18 +94,22 @@ def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, A
         content_type = (http_response.headers.get("content-type") or "unknown").strip()
         details.append(f"Content-Type: {content_type}")
 
-        if "json" not in content_type.lower():
-            details.append("Antwort ist kein JSON (häufig CAPTCHA/Challenge oder Block-Seite).")
-            preview = (http_response.text or "").strip()[:200]
-            if preview:
-                details.append(f"Body-Vorschau: {preview}")
+        if http_response.status_code == 404:
+            details.append("Der klassische Passwort-Endpoint liefert 404 und wird von Twitch häufig blockiert/abgeschaltet.")
+            details.append("Empfehlung: auth-token/cookies im Login-Bereich nutzen und Token-basierten Test ausführen.")
             return {
                 "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "success": False,
                 "details": details,
             }
 
-        response = http_response.json()
+        response = login.send_login_request(payload)
+
+        if "json" not in content_type.lower():
+            details.append("Antwort ist kein JSON (häufig CAPTCHA/Challenge oder Block-Seite).")
+            preview = (http_response.text or "").strip()[:200]
+            if preview:
+                details.append(f"Body-Vorschau: {preview}")
         error_code = response.get("error_code")
 
         if "access_token" in response:
