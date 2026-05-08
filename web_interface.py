@@ -24,6 +24,9 @@ COOKIES_PATH = Path(os.getenv("WEBUI_COOKIES_PATH", "/data/cookies"))
 DEFAULT_CONFIG: dict[str, Any] = {
     "username": "",
     "password": "",
+    "auth_token": "",
+    "persistent": "",
+    "cookie_file": "",
     "streamers": [],
     "make_predictions": True,
     "follow_raid": True,
@@ -181,6 +184,33 @@ def save_manual_cookies(username: str, auth_token: str, persistent_id: str = "")
     return True, details
 
 
+def load_cookies_from_file(cookie_path: str) -> tuple[bool, dict[str, str], list[str]]:
+    details: list[str] = []
+    target = Path(cookie_path).expanduser()
+    if not target.exists() or not target.is_file():
+        return False, {}, [f"Cookie-Datei nicht gefunden: {target}"]
+
+    try:
+        import pickle
+
+        cookies = pickle.load(target.open("rb"))
+        cookie_map = {}
+        for item in cookies:
+            if isinstance(item, dict) and item.get("name"):
+                cookie_map[item["name"]] = str(item.get("value", ""))
+
+        auth_token = cookie_map.get("auth-token", "")
+        persistent = cookie_map.get("persistent", "")
+        if not auth_token:
+            return False, {}, ["Cookie-Datei enthält keinen auth-token."]
+
+        details.append(f"Cookie-Datei geladen: {target}")
+        details.append("auth-token und persistent wurden in das Login-Formular übernommen.")
+        return True, {"auth_token": auth_token, "persistent": persistent, "cookie_file": str(target)}, details
+    except Exception as exc:
+        return False, {}, [f"Cookie-Datei konnte nicht gelesen werden: {exc.__class__.__name__}"]
+
+
 def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -235,140 +265,58 @@ def extract_runtime_status(log_lines: list[str]) -> dict[str, Any]:
 TEMPLATE = """
 <!doctype html>
 <html lang="de">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Twitch Miner Control Panel</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 0; background: #10131a; color: #f5f7ff; }
-    .container { max-width: 1024px; margin: 0 auto; padding: 20px; }
-    .card { background: #1a1f2b; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
-    input, select, textarea { width: 100%; padding: 8px; margin: 6px 0 12px; border-radius: 6px; border: 1px solid #37415a; background: #0f1522; color: #fff; }
-    button { background: #6f42c1; color: #fff; border: 0; padding: 10px 16px; border-radius: 6px; cursor: pointer; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px; overflow: auto; }
-    .meta { color: #97a0bb; font-size: 0.9rem; }
-  </style>
-</head>
-<body>
-<div class="container">
-  <h1>Twitch Channel Points Miner – Webinterface</h1>
-  <p class="meta">Config-Datei: {{ config_path }} | Log-Datei: {{ log_path }}</p>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Twitch Miner Control Panel</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 0; background: #10131a; color: #f5f7ff; }
+.container { max-width: 1024px; margin: 0 auto; padding: 20px; }
+.card { background: #1a1f2b; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+input, select { width: 100%; padding: 8px; margin: 6px 0 12px; border-radius: 6px; border: 1px solid #37415a; background: #0f1522; color: #fff; }
+button { background: #6f42c1; color: #fff; border: 0; padding: 10px 16px; border-radius: 6px; cursor: pointer; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px; overflow: auto; }
+.meta { color: #97a0bb; font-size: 0.9rem; }
+</style></head><body><div class="container">
+<h1>Twitch Channel Points Miner – Webinterface</h1>
+<p class="meta">Config-Datei: {{ config_path }} | Log-Datei: {{ log_path }}</p>
 
-  <div class="card">
-    <h2>Konfiguration</h2>
-    <form method="post" action="{{ url_for('save') }}">
-      <label>Username</label>
-      <input name="username" value="{{ config.get('username', '') }}">
-      <label>Password</label>
-      <input name="password" type="password" value="{{ config.get('password', '') }}">
-      <label>Proxy URL (optional, z. B. http://user:pass@host:port)</label>
-      <input name="proxy" value="{{ config.get('proxy', '') }}" placeholder="http://127.0.0.1:8080">
-
-      <label>Streamer (kommagetrennt)</label>
-      <input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
-
-      <div class="row">
-        <div>
-          <label>Chat Presence</label>
-          <select name="chat_presence">
-            {% for option in ['ALWAYS', 'NEVER', 'ONLINE', 'OFFLINE'] %}
-              <option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div>
-          <label>Bet Strategy</label>
-          <select name="bet_strategy">
-            {% for option in ['SMART', 'PERCENTAGE', 'MOST_VOTED'] %}
-              <option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>
-            {% endfor %}
-          </select>
-        </div>
-      </div>
-
-      <div class="row">
-        <div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div>
-        <div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div>
-      </div>
-
-      <div class="row">
-        <div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div>
-        <div></div>
-      </div>
-
-      <button type="submit">Speichern</button>
-    </form>
-    <p class="meta">Zuletzt gespeichert: {{ saved_at }}</p>
-  </div>
-
-  <div class="card">
-    <h2>Login-Test</h2>
-    <form method="post" action="{{ url_for('login_test') }}">
-      <button type="submit">Login testen</button>
-    </form>
-    <p class="meta">Letzter Test: {{ login_test.ran_at or 'Noch nie' }}</p>
-    <p>Ergebnis:
-      {% if login_test.success is sameas true %}<strong style="color:#7dff9a">Erfolgreich</strong>
-      {% elif login_test.success is sameas false %}<strong style="color:#ff7d7d">Fehlgeschlagen</strong>
-      {% else %}<strong style="color:#ffd77d">Nicht ausgeführt</strong>{% endif %}
-    </p>
-    <h3>Login-Test Log</h3>
-    <pre>{% for line in login_test.details %}{{ line }}
+<div class="card"><h2>Login</h2>
+<form method="post" action="{{ url_for('save_login') }}">
+<label>Username</label><input name="username" value="{{ config.get('username', '') }}">
+<label>Password</label><input name="password" type="password" value="{{ config.get('password', '') }}">
+<label>auth-token (optional)</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>persistent / User-ID (optional)</label><input name="persistent" value="{{ config.get('persistent', '') }}">
+<button type="submit">Login-Daten speichern</button></form>
+<h3>Login-Test</h3><form method="post" action="{{ url_for('login_test') }}"><button type="submit">Login testen</button></form>
+<p class="meta">Letzter Test: {{ login_test.ran_at or 'Noch nie' }}</p>
+<pre>{% for line in login_test.details %}{{ line }}
 {% endfor %}</pre>
-  </div>
+<h3>Cookie-Import</h3>
+<form method="post" action="{{ url_for('save_cookies') }}">
+<label>auth-token</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>persistent (optional User-ID)</label><input name="persistent" value="{{ config.get('persistent', '') }}">
+<button type="submit">Cookies speichern und übernehmen</button></form>
+<form method="post" action="{{ url_for('import_cookie_file') }}">
+<label>Vorhandene Cookie-Datei laden (z. B. /data/cookies/cognifex.pkl)</label><input name="cookie_file" value="{{ config.get('cookie_file', '') }}">
+<button type="submit">Cookie-Datei laden</button></form>
+<p class="meta">Letzter Import: {{ cookie_import.ran_at or 'Noch nie' }}</p>
+<pre>{% for line in cookie_import.details %}{{ line }}
+{% endfor %}</pre></div>
 
+<div class="card"><h2>Konfiguration</h2>
+<form method="post" action="{{ url_for('save') }}">
+<label>Proxy URL (optional)</label><input name="proxy" value="{{ config.get('proxy', '') }}">
+<label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
+<div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
+<div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
+<div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
+<div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div></div></div>
+<button type="submit">Speichern</button></form></div>
 
-  <div class="card">
-    <h2>Cookie-Import (Workaround bei Twitch Fehlercode 1000)</h2>
-    <p class="meta">Vorgehen: 1) Im normalen Browser bei Twitch anmelden und CAPTCHA lösen. 2) auth-token Cookie aus den DevTools kopieren. 3) Optional persistent Cookie ergänzen. 4) Hier speichern.</p>
-    <form method="post" action="{{ url_for('save_cookies') }}">
-      <label>auth-token</label>
-      <input name="auth_token" value="">
-      <label>persistent (optional User-ID)</label>
-      <input name="persistent" value="">
-      <button type="submit">Cookies speichern</button>
-    </form>
-    <p class="meta">Letzter Import: {{ cookie_import.ran_at or 'Noch nie' }}</p>
-    <p>Ergebnis:
-      {% if cookie_import.success is sameas true %}<strong style="color:#7dff9a">Erfolgreich</strong>
-      {% elif cookie_import.success is sameas false %}<strong style="color:#ff7d7d">Fehlgeschlagen</strong>
-      {% else %}<strong style="color:#ffd77d">Nicht ausgeführt</strong>{% endif %}
-    </p>
-    <pre>{% for line in cookie_import.details %}{{ line }}
-{% endfor %}</pre>
-  </div>
-
-  <div class="card">
-    <h2>Status</h2>
-    <p>Login-Status:
-      {% if runtime_status.login_failed %}<strong style="color:#ff7d7d">Fehlgeschlagen</strong>
-      {% elif runtime_status.login_ok %}<strong style="color:#7dff9a">Erfolgreich gestartet</strong>
-      {% else %}<strong style="color:#ffd77d">Noch kein eindeutiger Login-Status</strong>{% endif %}
-    </p>
-    <h3>Streamer-Status</h3>
-    {% if runtime_status.streamers %}
-      <ul>
-      {% for streamer, state in runtime_status.streamers.items() %}
-        <li><strong>{{ streamer }}</strong>:
-          {% if state == 'ONLINE' %}<span style="color:#7dff9a">ONLINE</span>{% else %}<span style="color:#ffb86c">OFFLINE</span>{% endif %}
-        </li>
-      {% endfor %}
-      </ul>
-    {% else %}
-      <p class="meta">Noch keine Streamer-Statusmeldungen in den Logs gefunden.</p>
-    {% endif %}
-  </div>
-
-  <div class="card">
-    <h2>Monitoring (Live-Log Tail)</h2>
-    <p><a href="{{ url_for('index') }}" style="color:#b9c4ff;">Aktualisieren</a></p>
-    <pre>{% for line in logs %}{{ line }}
-{% endfor %}</pre>
-  </div>
-</div>
-</body>
-</html>
+<div class="card"><h2>Status</h2>
+<p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
+<div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
+{% endfor %}</pre></div>
+</div></body></html>
 """
 
 
@@ -394,9 +342,13 @@ def index() -> str:
 @app.post("/save")
 def save() -> Any:
     streamers = [s.strip() for s in request.form.get("streamers", "").split(",") if s.strip()]
+    existing = load_config()
     config = {
-        "username": request.form.get("username", ""),
-        "password": request.form.get("password", ""),
+        "username": existing.get("username", ""),
+        "password": existing.get("password", ""),
+        "auth_token": existing.get("auth_token", ""),
+        "persistent": existing.get("persistent", ""),
+        "cookie_file": existing.get("cookie_file", ""),
         "streamers": streamers,
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
         "proxy": request.form.get("proxy", "").strip(),
@@ -411,11 +363,35 @@ def save() -> Any:
     return redirect(url_for("index"))
 
 
+@app.post("/save-login")
+def save_login() -> Any:
+    config = load_config()
+    config["username"] = request.form.get("username", "").strip()
+    config["password"] = request.form.get("password", "")
+    config["auth_token"] = request.form.get("auth_token", "").strip()
+    config["persistent"] = request.form.get("persistent", "").strip()
+    save_config(config)
+    return redirect(url_for("index"))
+
+
 @app.post("/login-test")
 def login_test() -> Any:
     config = load_config()
     global LAST_LOGIN_TEST
-    LAST_LOGIN_TEST = run_login_test(config.get("username", ""), config.get("password", ""), config.get("proxy", ""))
+    username = config.get("username", "").strip()
+    password = config.get("password", "")
+    auth_token = config.get("auth_token", "").strip()
+    if username and auth_token and not password:
+        twitch_login = TwitchLogin(CLIENT_ID, username, USER_AGENTS["Linux"]["CHROME"], password="")
+        twitch_login.set_token(auth_token)
+        success = twitch_login.check_login()
+        LAST_LOGIN_TEST = {
+            "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "success": success,
+            "details": ["Token-basierter Login-Test ausgeführt.", "Erfolgreich." if success else "Fehlgeschlagen: Token konnte nicht validiert werden."],
+        }
+    else:
+        LAST_LOGIN_TEST = run_login_test(username, password, config.get("proxy", ""))
     return redirect(url_for("index"))
 
 
@@ -427,6 +403,27 @@ def save_cookies() -> Any:
     persistent = request.form.get("persistent", "")
 
     success, details = save_manual_cookies(username, auth_token, persistent)
+    if success:
+        config["auth_token"] = auth_token.strip()
+        config["persistent"] = persistent.strip()
+        save_config(config)
+
+    global LAST_COOKIE_IMPORT
+    LAST_COOKIE_IMPORT = {
+        "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "success": success,
+        "details": details,
+    }
+    return redirect(url_for("index"))
+
+
+@app.post("/import-cookie-file")
+def import_cookie_file() -> Any:
+    config = load_config()
+    success, cookie_data, details = load_cookies_from_file(request.form.get("cookie_file", ""))
+    if success:
+        config.update(cookie_data)
+        save_config(config)
 
     global LAST_COOKIE_IMPORT
     LAST_COOKIE_IMPORT = {
