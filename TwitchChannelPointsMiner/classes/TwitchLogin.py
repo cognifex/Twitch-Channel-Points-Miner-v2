@@ -151,7 +151,10 @@ class TwitchLogin(object):
             if backup_token is not None:
                 self.set_token(backup_token)
                 return self.check_login()
-            return False
+            raise BadCredentialsException(
+                "Twitch blocked console credential login (CAPTCHA / anti-bot challenge). "
+                "Use a valid cookies/<username>.pkl with auth-token, or run once in an interactive TTY to complete browser login."
+            )
 
         return False
 
@@ -220,7 +223,12 @@ class TwitchLogin(object):
         if not sys.stdin.isatty():
             logger.error(
                 "CAPTCHA/Browser login is required, but no interactive TTY is available. "
-                "Skipping interactive fallback so the process can continue running."
+                "Credential-based login cannot continue in this environment."
+            )
+            logger.error(
+                "Workaround: provide cookies/%s.pkl containing at least auth-token (+ persistent/user_id), "
+                "or run once with -it and complete browser login.",
+                self.username,
             )
             return None
 
