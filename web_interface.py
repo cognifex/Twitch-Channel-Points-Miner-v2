@@ -276,9 +276,13 @@ body { font-family: Arial, sans-serif; margin: 0; background: #10131a; color: #f
 .card { background: #1a1f2b; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
 input, select { width: 100%; padding: 8px; margin: 6px 0 12px; border-radius: 6px; border: 1px solid #37415a; background: #0f1522; color: #fff; }
 button { background: #6f42c1; color: #fff; border: 0; padding: 10px 16px; border-radius: 6px; cursor: pointer; }
+.button-secondary { background: #2f3b57; }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.button-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px; overflow: auto; }
 .meta { color: #97a0bb; font-size: 0.9rem; }
+.copy-box { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.copy-box input { margin: 0; font-family: monospace; }
 </style></head><body><div class="container">
 <h1>Twitch Channel Points Miner – Webinterface</h1>
 <p class="meta">Config-Datei: {{ config_path }} | Log-Datei: {{ log_path }}</p>
@@ -288,9 +292,16 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <label>Username</label><input name="username" value="{{ config.get('username', '') }}">
 <label>Password</label><input name="password" type="password" value="{{ config.get('password', '') }}">
 <label>auth-token (optional)</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<p class="meta">Wenn Twitch-Login per Passwort blockiert ist (z. B. HTTP 404), nutze auth-token + optional persistent-ID aus deinen Browser-Cookies.</p>
+<p class="meta">Token holen: In Twitch eingeloggt <strong>F12 → Konsole</strong> öffnen und folgenden Befehl ausführen:</p>
+<div class="copy-box"><input id="token-command" readonly value="document.cookie.split('; ').find(c => c.startsWith('auth-token='))?.split('=')[1]"><button type="button" class="button-secondary" onclick="copyTokenCommand()">Befehl kopieren</button></div>
 <label>persistent / User-ID (optional)</label><input name="persistent" value="{{ config.get('persistent', '') }}">
 <button type="submit">Login-Daten speichern</button></form>
-<h3>Login-Test</h3><form method="post" action="{{ url_for('login_test') }}"><button type="submit">Login testen</button></form>
+<h3>Login-Test</h3>
+<div class="button-row">
+<form method="post" action="{{ url_for('login_test') }}"><button type="submit">Passwort-Login testen</button></form>
+<form method="post" action="{{ url_for('login_test_token') }}"><button type="submit" class="button-secondary">Token-Login testen</button></form>
+</div>
 <p class="meta">Letzter Test: {{ login_test.ran_at or 'Noch nie' }}</p>
 <pre>{% for line in login_test.details %}{{ line }}
 {% endfor %}</pre>
@@ -320,7 +331,16 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
 <div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
-</div></body></html>
+</div>
+<script>
+function copyTokenCommand() {
+  const tokenInput = document.getElementById("token-command");
+  tokenInput.select();
+  tokenInput.setSelectionRange(0, 99999);
+  navigator.clipboard.writeText(tokenInput.value);
+}
+</script>
+</body></html>
 """
 
 
@@ -396,6 +416,32 @@ def login_test() -> Any:
         }
     else:
         LAST_LOGIN_TEST = run_login_test(username, password, config.get("proxy", ""))
+    return redirect(url_for("index"))
+
+
+@app.post("/login-test-token")
+def login_test_token() -> Any:
+    config = load_config()
+    username = config.get("username", "").strip()
+    auth_token = config.get("auth_token", "").strip()
+
+    global LAST_LOGIN_TEST
+    if not username or not auth_token:
+        LAST_LOGIN_TEST = {
+            "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "success": False,
+            "details": ["Token-basierter Login-Test konnte nicht gestartet werden.", "Username und auth-token sind erforderlich."],
+        }
+        return redirect(url_for("index"))
+
+    twitch_login = TwitchLogin(CLIENT_ID, username, USER_AGENTS["Linux"]["CHROME"], password="")
+    twitch_login.set_token(auth_token)
+    success = twitch_login.check_login()
+    LAST_LOGIN_TEST = {
+        "ran_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "success": success,
+        "details": ["Token-basierter Login-Test ausgeführt.", "Erfolgreich." if success else "Fehlgeschlagen: Token konnte nicht validiert werden."],
+    }
     return redirect(url_for("index"))
 
 
