@@ -18,6 +18,7 @@ import requests
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
 from TwitchChannelPointsMiner.classes.Exceptions import (
+    BadCredentialsException,
     StreamerDoesNotExistException,
     StreamerIsOfflineException,
 )
@@ -39,9 +40,16 @@ logger = logging.getLogger(__name__)
 
 
 class Twitch(object):
-    __slots__ = ["cookies_file", "user_agent", "twitch_login", "running"]
+    __slots__ = ["cookies_file", "user_agent", "twitch_login", "running", "auto_login", "prefer_token_login"]
 
-    def __init__(self, username, user_agent, password=None):
+    def __init__(
+        self,
+        username,
+        user_agent,
+        password=None,
+        auto_login=True,
+        prefer_token_login=False,
+    ):
         cookies_path = os.path.join(Path().absolute(), "cookies")
         Path(cookies_path).mkdir(parents=True, exist_ok=True)
         self.cookies_file = os.path.join(cookies_path, f"{username}.pkl")
@@ -50,14 +58,28 @@ class Twitch(object):
             CLIENT_ID, username, self.user_agent, password=password
         )
         self.running = True
+        self.auto_login = auto_login
+        self.prefer_token_login = prefer_token_login
 
     def login(self):
-        if os.path.isfile(self.cookies_file) is False:
-            if self.twitch_login.login_flow():
-                self.twitch_login.save_cookies(self.cookies_file)
-        else:
+        if self.auto_login is False:
+            logger.info("Auto login disabled. Skipping login during startup.")
+            return
+
+        has_cookies_file = os.path.isfile(self.cookies_file)
+
+        if has_cookies_file:
             self.twitch_login.load_cookies(self.cookies_file)
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
+            return
+
+        if self.prefer_token_login:
+            raise BadCredentialsException(
+                f"Token login requested, but cookies file was not found: {self.cookies_file}"
+            )
+
+        if self.twitch_login.login_flow():
+            self.twitch_login.save_cookies(self.cookies_file)
 
     # === STREAMER / STREAM / INFO === #
     def update_stream(self, streamer):
