@@ -18,7 +18,10 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
     Streamer,
     StreamerSettings,
 )
-from TwitchChannelPointsMiner.classes.Exceptions import StreamerDoesNotExistException
+from TwitchChannelPointsMiner.classes.Exceptions import (
+    BadCredentialsException,
+    StreamerDoesNotExistException,
+)
 from TwitchChannelPointsMiner.classes.Settings import FollowersOrder, Priority, Settings
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.WebSocketsPool import WebSocketsPool
@@ -165,7 +168,16 @@ class TwitchChannelPointsMiner:
             self.running = True
             self.start_datetime = datetime.now()
 
-            self.twitch.login()
+            try:
+                self.twitch.login()
+            except BadCredentialsException as exc:
+                logger.error(
+                    "Login failed: %s",
+                    exc,
+                    extra={"emoji": ":no_entry_sign:"},
+                )
+                self.end()
+                return
 
             if self.claim_drops_startup is True:
                 self.twitch.claim_all_drops_from_inventory()
