@@ -174,19 +174,6 @@ class TwitchLogin(object):
             )
             return {"error_code": 1000}
 
-        content_type = response.headers.get("content-type", "")
-        if "json" not in content_type.lower():
-            logger.warning(
-                "Unexpected non-JSON response from Twitch login endpoint "
-                "(status=%s, content_type=%s). Falling back to browser login flow.",
-                response.status_code,
-                content_type or "unknown",
-            )
-            logger.debug(
-                "Raw Twitch login response (first 500 chars): %s", response.text[:500]
-            )
-            return {"error_code": 1000}
-
         body = response.text.strip()
         if not body:
             logger.warning(
@@ -198,11 +185,14 @@ class TwitchLogin(object):
 
         try:
             parsed_response = response.json()
-        except Exception:
+        except ValueError:
+            content_type = response.headers.get("content-type", "")
             logger.warning(
-                "Twitch login endpoint returned invalid JSON (status=%s). "
+                "Twitch login endpoint returned invalid JSON "
+                "(status=%s, content_type=%s). "
                 "Falling back to browser login flow.",
                 response.status_code,
+                content_type or "unknown",
             )
             logger.debug(
                 "Raw Twitch login response (first 500 chars): %s", body[:500]
