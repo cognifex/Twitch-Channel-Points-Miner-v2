@@ -194,8 +194,8 @@ class TwitchLogin(object):
             return {"error_code": 1000}
 
         try:
-            return response.json()
-        except (ValueError, requests.exceptions.JSONDecodeError):
+            parsed_response = response.json()
+        except Exception:
             logger.warning(
                 "Twitch login endpoint returned invalid JSON (status=%s). "
                 "Falling back to browser login flow.",
@@ -205,6 +205,15 @@ class TwitchLogin(object):
                 "Raw Twitch login response (first 500 chars): %s", body[:500]
             )
             return {"error_code": 1000}
+
+        if not isinstance(parsed_response, dict):
+            logger.warning(
+                "Unexpected Twitch login payload type (%s). Falling back to browser login flow.",
+                type(parsed_response).__name__,
+            )
+            return {"error_code": 1000}
+
+        return parsed_response
 
     def login_flow_backup(self):
         """Backup OAuth login flow in case manual captcha solving is required"""
