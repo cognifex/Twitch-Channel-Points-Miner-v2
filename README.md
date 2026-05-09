@@ -726,3 +726,5 @@ Webinterface:
 - Login- und Streamer-Status werden aus den Log-Zeilen erkannt und im UI angezeigt
 
 Hinweis: Das Webinterface schreibt **keine** `run.py` automatisch um, sondern pflegt eine separate `config.json`, die du für deine eigene `run.py` verwenden kannst.
+
+If startup keeps showing old stack traces after pulling updates, rebuild images explicitly: `docker compose up -d --build --force-recreate`.
