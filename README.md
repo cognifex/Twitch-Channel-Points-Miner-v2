@@ -696,11 +696,22 @@ This project comes with no guarantee or warranty. You are responsible for whatev
 - `miner`: der eigentliche Twitch Channel Points Miner
 - `webui`: ein Flask-Webinterface zur Konfiguration und zum Monitoring
 
-Start:
+Deployment (reproducible sequence):
 
 ```bash
-docker compose up -d
+git pull --ff-only
+docker compose down
+docker compose build --no-cache miner
+docker compose up -d --force-recreate
+docker compose ps
+docker compose logs -f miner
 ```
+
+Service naming note:
+
+- Compose **service name** for the miner is `miner` (from `services:` in `docker-compose.yml`).
+- `container_name` can be customized (default: `twitch-channel-points-miner`) and is **not** used in `docker compose ... <service>` commands.
+- Always use the service name in operations: `build`, `up`, `logs`, `restart`.
 
 Webinterface:
 
