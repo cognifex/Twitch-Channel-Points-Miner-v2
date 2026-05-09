@@ -483,7 +483,7 @@ class TwitchChannelPointsMiner:
                                 self.streamers[index]
                             )
 
-    def end(self, signum=None, frame=None, exit_code=0):
+    def end(self, signum=None, frame=None, exit_code=0, *_, **__):
         if self._is_shutting_down:
             logger.debug("Shutdown already in progress; skipping duplicate end() call.")
             return
