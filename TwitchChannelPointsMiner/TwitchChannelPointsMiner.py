@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import json
 import logging
 import os
 import random
@@ -9,6 +10,8 @@ import threading
 import time
 import uuid
 from datetime import datetime
+
+from requests.exceptions import RequestException
 from pathlib import Path
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import AnalyticsServer
@@ -71,6 +74,59 @@ def _resolve_login_mode(login_mode, auto_login, prefer_token_login):
         return "token"
 
     return "credentials"
+
+
+LOGIN_ERROR_CATEGORY_MISSING_COOKIES = "missing_cookies"
+LOGIN_ERROR_CATEGORY_INVALID_TOKEN = "invalid_token"
+LOGIN_ERROR_CATEGORY_HTTP_OR_JSON = "http_or_json_error"
+LOGIN_ERROR_CATEGORY_UNKNOWN = "unknown_login_error"
+
+LOGIN_ERROR_EXIT_CODES = {
+    LOGIN_ERROR_CATEGORY_MISSING_COOKIES: 20,
+    LOGIN_ERROR_CATEGORY_INVALID_TOKEN: 21,
+    LOGIN_ERROR_CATEGORY_HTTP_OR_JSON: 22,
+    LOGIN_ERROR_CATEGORY_UNKNOWN: 29,
+}
+
+
+def _categorize_login_error(exc):
+    message = str(exc).lower()
+
+    if "cookie" in message:
+        return LOGIN_ERROR_CATEGORY_MISSING_COOKIES
+
+    if isinstance(exc, BadCredentialsException) or "token" in message or "auth" in message:
+        return LOGIN_ERROR_CATEGORY_INVALID_TOKEN
+
+    if isinstance(exc, (RequestException, json.JSONDecodeError, LoginResponseParseException, ValueError)):
+        return LOGIN_ERROR_CATEGORY_HTTP_OR_JSON
+
+    return LOGIN_ERROR_CATEGORY_UNKNOWN
+
+
+def _log_operator_image_commit_hint():
+    image_ref = os.getenv("MINER_IMAGE", "unknown-image")
+    expected_commit = os.getenv("EXPECTED_COMMIT", "unknown-commit")
+    logger.info(
+        "Operator hint: Container läuft mit Image %s, erwarteter Commit %s",
+        image_ref,
+        expected_commit,
+        extra={"emoji": ":information_source:"},
+    )
+
+
+def _exit_on_fatal_login_if_enabled(category):
+    if os.getenv("TCPM_EXIT_ON_FATAL_LOGIN", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+
+    exit_code = LOGIN_ERROR_EXIT_CODES.get(category, LOGIN_ERROR_EXIT_CODES[LOGIN_ERROR_CATEGORY_UNKNOWN])
+    logger.error(
+        "Stopping process due to non-recoverable login error category '%s' (exit code: %s).",
+        category,
+        exit_code,
+        extra={"emoji": ":octagonal_sign:"},
+    )
+    raise SystemExit(exit_code)
 
 
 class TwitchChannelPointsMiner:
@@ -206,25 +262,32 @@ class TwitchChannelPointsMiner:
             )
             self.running = True
             self.start_datetime = datetime.now()
+            _log_operator_image_commit_hint()
 
             try:
                 self.twitch.login()
-            except (BadCredentialsException, LoginResponseParseException) as exc:
+            except Exception as exc:
+                category = _categorize_login_error(exc)
                 logger.error(
-                    "Login failed: %s",
+                    "Login failed [%s]: %s",
+                    category,
                     exc,
                     extra={"emoji": ":no_entry_sign:"},
                 )
                 self.end()
+                _exit_on_fatal_login_if_enabled(category)
                 return
 
             auth_token = self.twitch.twitch_login.get_auth_token()
             if not auth_token:
+                category = LOGIN_ERROR_CATEGORY_INVALID_TOKEN
                 logger.error(
-                    "No Twitch auth token available. Start aborted because login did not complete.",
+                    "No Twitch auth token available. Start aborted because login did not complete. [%s]",
+                    category,
                     extra={"emoji": ":no_entry_sign:"},
                 )
                 self.end()
+                _exit_on_fatal_login_if_enabled(category)
                 return
 
             if self.claim_drops_startup is True:

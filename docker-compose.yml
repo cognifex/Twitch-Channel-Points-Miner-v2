@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ${CONTAINER_NAME:-twitch-channel-points-miner}
-    restart: unless-stopped
+    restart: on-failure:3
     stdin_open: true
     tty: true
     environment:
