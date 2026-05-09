@@ -138,6 +138,7 @@ class MinerProcessManager:
             self._state = "starting"
             self._last_error = ""
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            Path("/data/logs").mkdir(parents=True, exist_ok=True)
             try:
                 current_config = load_config()
                 login_mode = _sanitize_login_mode(current_config.get("login_mode"))
@@ -167,6 +168,7 @@ class MinerProcessManager:
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                     env=process_env,
+                    cwd="/data",
                 )
                 time.sleep(1)
                 if self._process.poll() is not None:
