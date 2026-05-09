@@ -15,6 +15,9 @@ import requests
 
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
+from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
 
 app = Flask(__name__)
 
@@ -46,6 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_points": 50000,
         "minimum_points": 0,
     },
+    "streamer_overrides": {},
 }
 
 
@@ -338,6 +342,62 @@ def save_config(config: dict[str, Any]) -> None:
         json.dump(config, fp, indent=2)
 
 
+def _bool_from_form(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _normalize_streamer_overrides(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for streamer_name, override in raw.items():
+        if not isinstance(streamer_name, str) or not isinstance(override, dict):
+            continue
+        key = streamer_name.strip().lower()
+        if not key:
+            continue
+        normalized[key] = {
+            "make_predictions": bool(override.get("make_predictions", True)),
+            "follow_raid": bool(override.get("follow_raid", True)),
+            "claim_drops": bool(override.get("claim_drops", True)),
+            "watch_streak": bool(override.get("watch_streak", True)),
+            "chat": str(override.get("chat", "ONLINE")).strip().upper() or "ONLINE",
+            "bet": {
+                "strategy": str(override.get("bet", {}).get("strategy", "SMART")).strip().upper() or "SMART",
+                "percentage": int(override.get("bet", {}).get("percentage", 5)),
+                "max_points": int(override.get("bet", {}).get("max_points", 50000)),
+                "minimum_points": int(override.get("bet", {}).get("minimum_points", 0)),
+            },
+        }
+    return normalized
+
+
+def build_streamers_from_config(config: dict[str, Any]) -> list[Streamer]:
+    overrides = _normalize_streamer_overrides(config.get("streamer_overrides", {}))
+    streamers: list[Streamer] = []
+    for streamer_name in config.get("streamers", []):
+        username = str(streamer_name).strip().lower()
+        if not username:
+            continue
+        override = overrides.get(username, {})
+        bet_data = override.get("bet", {})
+        settings = StreamerSettings(
+            make_predictions=override.get("make_predictions"),
+            follow_raid=override.get("follow_raid"),
+            claim_drops=override.get("claim_drops"),
+            watch_streak=override.get("watch_streak"),
+            chat=getattr(ChatPresence, str(override.get("chat", "ONLINE")).upper(), ChatPresence.ONLINE),
+            bet=BetSettings(
+                strategy=getattr(Strategy, str(bet_data.get("strategy", "SMART")).upper(), Strategy.SMART),
+                percentage=int(bet_data.get("percentage", 5)),
+                max_points=int(bet_data.get("max_points", 50000)),
+                minimum_points=int(bet_data.get("minimum_points", 0)),
+            ),
+        )
+        streamers.append(Streamer(username, settings=settings))
+    return streamers
+
+
 def read_log_tail(lines: int = 200) -> list[str]:
     if not LOG_PATH.exists():
         return ["Noch keine Logs gefunden."]
@@ -436,6 +496,35 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
 <div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
 <div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div></div></div>
+<h3>Streamer-Overrides</h3>
+<p class="meta">Optional pro Kanal individuelle Settings setzen. Leer = globale Defaults aus der Hauptkonfiguration.</p>
+{% for streamer_name in config.get('streamers', []) %}
+{% set key = streamer_name.lower() %}
+{% set ov = config.get('streamer_overrides', {}).get(key, {}) %}
+{% set ov_bet = ov.get('bet', {}) %}
+<div class="card" style="background:#141a26;margin-top:10px;">
+<h4 style="margin-top:0;">{{ streamer_name }}</h4>
+<div class="row">
+<div><label><input type="checkbox" name="ov_{{ key }}_make_predictions" {% if ov.get('make_predictions', config.get('make_predictions', True)) %}checked{% endif %}> make_predictions</label></div>
+<div><label><input type="checkbox" name="ov_{{ key }}_follow_raid" {% if ov.get('follow_raid', config.get('follow_raid', True)) %}checked{% endif %}> follow_raid</label></div>
+</div>
+<div class="row">
+<div><label><input type="checkbox" name="ov_{{ key }}_claim_drops" {% if ov.get('claim_drops', config.get('claim_drops', True)) %}checked{% endif %}> claim_drops</label></div>
+<div><label><input type="checkbox" name="ov_{{ key }}_watch_streak" {% if ov.get('watch_streak', config.get('watch_streak', True)) %}checked{% endif %}> watch_streak</label></div>
+</div>
+<div class="row">
+<div><label>chat</label><select name="ov_{{ key }}_chat">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if ov.get('chat', config.get('chat_presence', 'ONLINE')) == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
+<div><label>bet.strategy</label><select name="ov_{{ key }}_bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if ov_bet.get('strategy', config.get('bet', {}).get('strategy', 'SMART')) == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
+</div>
+<div class="row">
+<div><label>bet.percentage</label><input name="ov_{{ key }}_bet_percentage" type="number" min="1" max="100" value="{{ ov_bet.get('percentage', config.get('bet', {}).get('percentage', 5)) }}"></div>
+<div><label>bet.max_points</label><input name="ov_{{ key }}_bet_max_points" type="number" min="1" value="{{ ov_bet.get('max_points', config.get('bet', {}).get('max_points', 50000)) }}"></div>
+</div>
+<div class="row">
+<div><label>bet.minimum_points</label><input name="ov_{{ key }}_bet_minimum_points" type="number" min="0" value="{{ ov_bet.get('minimum_points', config.get('bet', {}).get('minimum_points', 0)) }}"></div><div></div>
+</div>
+</div>
+{% endfor %}
 <button type="submit">Speichern</button></form></div>
 
 <div class="card"><h2>Status</h2>
@@ -468,6 +557,7 @@ function copyTokenCommand() {
 @app.get("/")
 def index() -> str:
     config = load_config()
+    config["streamer_overrides"] = _normalize_streamer_overrides(config.get("streamer_overrides", {}))
     logs = read_log_tail()
     saved_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     runtime_status = extract_runtime_status(logs)
@@ -490,6 +580,22 @@ def index() -> str:
 def save() -> Any:
     streamers = [s.strip() for s in request.form.get("streamers", "").split(",") if s.strip()]
     existing = load_config()
+    streamer_overrides: dict[str, Any] = {}
+    for streamer_name in streamers:
+        key = streamer_name.lower().strip()
+        streamer_overrides[key] = {
+            "make_predictions": _bool_from_form(request.form.get(f"ov_{key}_make_predictions")),
+            "follow_raid": _bool_from_form(request.form.get(f"ov_{key}_follow_raid")),
+            "claim_drops": _bool_from_form(request.form.get(f"ov_{key}_claim_drops")),
+            "watch_streak": _bool_from_form(request.form.get(f"ov_{key}_watch_streak")),
+            "chat": request.form.get(f"ov_{key}_chat", existing.get("chat_presence", "ONLINE")).strip().upper(),
+            "bet": {
+                "strategy": request.form.get(f"ov_{key}_bet_strategy", "SMART").strip().upper(),
+                "percentage": int(request.form.get(f"ov_{key}_bet_percentage", existing.get("bet", {}).get("percentage", 5))),
+                "max_points": int(request.form.get(f"ov_{key}_bet_max_points", existing.get("bet", {}).get("max_points", 50000))),
+                "minimum_points": int(request.form.get(f"ov_{key}_bet_minimum_points", existing.get("bet", {}).get("minimum_points", 0))),
+            },
+        }
     config = {
         "username": existing.get("username", ""),
         "password": existing.get("password", ""),
@@ -502,12 +608,17 @@ def save() -> Any:
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
         "max_login_tries": max(1, int(request.form.get("max_login_tries", 3))),
         "login_mode": _sanitize_login_mode(request.form.get("login_mode", existing.get("login_mode", "token"))),
+        "make_predictions": existing.get("make_predictions", True),
+        "follow_raid": existing.get("follow_raid", True),
+        "claim_drops": existing.get("claim_drops", True),
+        "watch_streak": existing.get("watch_streak", True),
         "bet": {
             "strategy": request.form.get("bet_strategy", "SMART"),
             "percentage": int(request.form.get("bet_percentage", 5)),
             "max_points": int(request.form.get("bet_max_points", 50000)),
             "minimum_points": int(request.form.get("bet_minimum_points", 0)),
         },
+        "streamer_overrides": streamer_overrides,
     }
     save_config(config)
     return redirect(url_for("index"))
@@ -612,6 +723,8 @@ def import_cookie_file() -> Any:
 
 @app.post("/miner/start")
 def miner_start() -> Any:
+    config = load_config()
+    build_streamers_from_config(config)
     _, message = MINER_MANAGER.start()
     return redirect(url_for("index", miner_message=message))
 
