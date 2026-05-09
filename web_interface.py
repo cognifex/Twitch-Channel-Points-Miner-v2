@@ -27,7 +27,7 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode, OutcomeKeys, Strategy
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
 
 app = Flask(__name__)
