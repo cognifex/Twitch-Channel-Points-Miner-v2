@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import threading
 from datetime import datetime
 import re
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
 import requests
 
@@ -19,6 +21,7 @@ app = Flask(__name__)
 CONFIG_PATH = Path(os.getenv("WEBUI_CONFIG_PATH", "/data/config.json"))
 LOG_PATH = Path(os.getenv("WEBUI_LOG_PATH", "/data/logs/latest.log"))
 COOKIES_PATH = Path(os.getenv("WEBUI_COOKIES_PATH", "/data/cookies"))
+MINER_COMMAND = os.getenv("WEBUI_MINER_COMMAND", "python /data/run.py")
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -58,6 +61,94 @@ LAST_COOKIE_IMPORT: dict[str, Any] = {
     "success": None,
     "details": ["Noch kein Cookie-Import durchgeführt."],
 }
+
+
+class MinerProcessManager:
+    def __init__(self, command: str):
+        self.command = command
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+        self._state = "stopped"
+        self._last_error = ""
+
+    def _is_process_running(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def _refresh_state_locked(self) -> None:
+        if self._state == "starting" and self._is_process_running():
+            self._state = "running"
+            self._last_error = ""
+        elif self._process is not None and self._process.poll() is not None:
+            if self._state in {"running", "starting"}:
+                self._state = "error"
+                self._last_error = f"Miner beendet (Code {self._process.poll()})."
+            self._process = None
+
+    def get_status(self) -> dict[str, Any]:
+        with self._lock:
+            self._refresh_state_locked()
+            return {
+                "state": self._state,
+                "pid": self._process.pid if self._is_process_running() else None,
+                "command": self.command,
+                "last_error": self._last_error,
+            }
+
+    def start(self) -> tuple[bool, str]:
+        with self._lock:
+            self._refresh_state_locked()
+            if self._is_process_running() or self._state == "starting":
+                return False, "Miner läuft bereits oder startet gerade."
+            if not CONFIG_PATH.exists():
+                return False, f"Config-Datei fehlt: {CONFIG_PATH}"
+            self._state = "starting"
+            self._last_error = ""
+            try:
+                self._process = subprocess.Popen(  # noqa: S603
+                    self.command,
+                    shell=True,  # noqa: S602
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                self._state = "running"
+                return True, "Miner wurde gestartet."
+            except Exception as exc:
+                self._state = "error"
+                self._process = None
+                self._last_error = f"Start fehlgeschlagen: {exc.__class__.__name__}"
+                return False, self._last_error
+
+    def stop(self) -> tuple[bool, str]:
+        with self._lock:
+            self._refresh_state_locked()
+            if not self._is_process_running():
+                self._state = "stopped"
+                self._process = None
+                return False, "Miner läuft nicht."
+            assert self._process is not None
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait(timeout=10)
+            finally:
+                self._process = None
+                self._state = "stopped"
+            return True, "Miner wurde gestoppt."
+
+    def restart(self) -> tuple[bool, str]:
+        stop_success, stop_msg = self.stop()
+        start_success, start_msg = self.start()
+        if start_success:
+            if stop_success:
+                return True, "Miner wurde neu gestartet."
+            return True, f"Miner neu gestartet (vorher: {stop_msg})"
+        return False, f"Restart fehlgeschlagen: {start_msg}"
+
+
+MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
 
 
 def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, Any]:
@@ -333,6 +424,15 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 
 <div class="card"><h2>Status</h2>
 <p>Autostart-Modus: <strong>{{ config.get('autostart_mode', 'enabled') }}</strong></p>
+<div class="button-row">
+<form method="post" action="{{ url_for('miner_start') }}"><button type="submit">Miner starten</button></form>
+<form method="post" action="{{ url_for('miner_stop') }}"><button type="submit" class="button-secondary">Miner stoppen</button></form>
+<form method="post" action="{{ url_for('miner_restart') }}"><button type="submit" class="button-secondary">Miner neu starten</button></form>
+</div>
+<p>Miner-Status: <strong>{{ miner_status.state }}</strong>{% if miner_status.pid %} (PID {{ miner_status.pid }}){% endif %}</p>
+{% if miner_status.last_error %}<p style="color:#ff9f9f">Letzter Fehler: {{ miner_status.last_error }}</p>{% endif %}
+<p class="meta">Startkommando: {{ miner_status.command }}</p>
+{% if miner_action_message %}<p class="meta">Aktion: {{ miner_action_message }}</p>{% endif %}
 <p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
 <div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
@@ -365,6 +465,8 @@ def index() -> str:
         runtime_status=runtime_status,
         login_test=LAST_LOGIN_TEST,
         cookie_import=LAST_COOKIE_IMPORT,
+        miner_status=MINER_MANAGER.get_status(),
+        miner_action_message=request.args.get("miner_message", ""),
     )
 
 
@@ -489,6 +591,53 @@ def import_cookie_file() -> Any:
         "details": details,
     }
     return redirect(url_for("index"))
+
+
+@app.post("/miner/start")
+def miner_start() -> Any:
+    _, message = MINER_MANAGER.start()
+    return redirect(url_for("index", miner_message=message))
+
+
+@app.post("/miner/stop")
+def miner_stop() -> Any:
+    _, message = MINER_MANAGER.stop()
+    return redirect(url_for("index", miner_message=message))
+
+
+@app.post("/miner/restart")
+def miner_restart() -> Any:
+    _, message = MINER_MANAGER.restart()
+    return redirect(url_for("index", miner_message=message))
+
+
+@app.get("/api/miner/status")
+def api_miner_status() -> Any:
+    return jsonify(MINER_MANAGER.get_status())
+
+
+@app.post("/api/miner/start")
+def api_miner_start() -> Any:
+    success, message = MINER_MANAGER.start()
+    payload = MINER_MANAGER.get_status()
+    payload.update({"success": success, "message": message})
+    return jsonify(payload), (200 if success else 409)
+
+
+@app.post("/api/miner/stop")
+def api_miner_stop() -> Any:
+    success, message = MINER_MANAGER.stop()
+    payload = MINER_MANAGER.get_status()
+    payload.update({"success": success, "message": message})
+    return jsonify(payload), (200 if success else 409)
+
+
+@app.post("/api/miner/restart")
+def api_miner_restart() -> Any:
+    success, message = MINER_MANAGER.restart()
+    payload = MINER_MANAGER.get_status()
+    payload.update({"success": success, "message": message})
+    return jsonify(payload), (200 if success else 409)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("WEBUI_PORT", "8080")), debug=False)
