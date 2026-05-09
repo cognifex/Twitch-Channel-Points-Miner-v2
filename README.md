@@ -203,6 +203,7 @@ twitch_miner = TwitchChannelPointsMiner(
     username="your-twitch-username",
     password="write-your-secure-psw",           # If no password will be provided, the script will ask interactively
     claim_drops_startup=False,                  # If you want to auto claim all drops from Twitch inventory on the startup
+    login_mode="token",                         # Default: token/cookie login only. Use "credentials" for interactive credential login or "none" to skip startup login
     priority=[                                  # Custom priority in this case for example:
         Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers
         Priority.DROPS,                         # - When we don't have anymore watch streak to catch, wait until all drops are collected over the streamers
@@ -325,6 +326,8 @@ These folders are mounted :
 - analytics : to save the analytics data
 - cookies : to provide login information
 - logs : to keep logs outside of container
+
+Default login mode in `run.py` should be `login_mode="token"` so containers run cookie/token-only by default.
 
 **Example using docker-compose:**
 
