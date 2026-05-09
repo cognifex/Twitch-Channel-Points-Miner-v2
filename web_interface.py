@@ -14,7 +14,8 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 import requests
 
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
-from TwitchChannelPointsMiner.classes.Settings import Priority
+from TwitchChannelPointsMiner.classes.Telegram import Telegram
+from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
@@ -56,7 +57,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "delay_mode": "FROM_END",
         "delay": 6,
     },
-    "streamer_overrides": {},
+    "telegram": {
+        "chat_id": "",
+        "token": "",
+        "events": ["BET_WIN", "BET_LOSE"],
+        "disable_notification": False,
+    },
+    "discord": {
+        "webhook_api": "",
+        "events": ["BET_WIN", "BET_LOSE"],
+    },
 }
 
 
@@ -493,60 +503,36 @@ def save_config(config: dict[str, Any]) -> None:
         json.dump(config, fp, indent=2)
 
 
-def _bool_from_form(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "on", "yes"}
+def _parse_events(value: str) -> list[str]:
+    return [event.strip() for event in value.split(",") if event.strip()]
 
 
-def _normalize_streamer_overrides(raw: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(raw, dict):
-        return {}
-    normalized: dict[str, dict[str, Any]] = {}
-    for streamer_name, override in raw.items():
-        if not isinstance(streamer_name, str) or not isinstance(override, dict):
-            continue
-        key = streamer_name.strip().lower()
-        if not key:
-            continue
-        normalized[key] = {
-            "make_predictions": bool(override.get("make_predictions", True)),
-            "follow_raid": bool(override.get("follow_raid", True)),
-            "claim_drops": bool(override.get("claim_drops", True)),
-            "watch_streak": bool(override.get("watch_streak", True)),
-            "chat": str(override.get("chat", "ONLINE")).strip().upper() or "ONLINE",
-            "bet": {
-                "strategy": str(override.get("bet", {}).get("strategy", "SMART")).strip().upper() or "SMART",
-                "percentage": int(override.get("bet", {}).get("percentage", 5)),
-                "max_points": int(override.get("bet", {}).get("max_points", 50000)),
-                "minimum_points": int(override.get("bet", {}).get("minimum_points", 0)),
-            },
-        }
-    return normalized
+def _safe_chat_id(value: str | int | None) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
-def build_streamers_from_config(config: dict[str, Any]) -> list[Streamer]:
-    overrides = _normalize_streamer_overrides(config.get("streamer_overrides", {}))
-    streamers: list[Streamer] = []
-    for streamer_name in config.get("streamers", []):
-        username = str(streamer_name).strip().lower()
-        if not username:
-            continue
-        override = overrides.get(username, {})
-        bet_data = override.get("bet", {})
-        settings = StreamerSettings(
-            make_predictions=override.get("make_predictions"),
-            follow_raid=override.get("follow_raid"),
-            claim_drops=override.get("claim_drops"),
-            watch_streak=override.get("watch_streak"),
-            chat=getattr(ChatPresence, str(override.get("chat", "ONLINE")).upper(), ChatPresence.ONLINE),
-            bet=BetSettings(
-                strategy=getattr(Strategy, str(bet_data.get("strategy", "SMART")).upper(), Strategy.SMART),
-                percentage=int(bet_data.get("percentage", 5)),
-                max_points=int(bet_data.get("max_points", 50000)),
-                minimum_points=int(bet_data.get("minimum_points", 0)),
-            ),
-        )
-        streamers.append(Streamer(username, settings=settings))
-    return streamers
+def build_logger_settings_payload(config: dict[str, Any]) -> dict[str, Any]:
+    telegram_config = config.get("telegram", {}) or {}
+    discord_config = config.get("discord", {}) or {}
+
+    return {
+        "telegram": {
+            "chat_id": _safe_chat_id(telegram_config.get("chat_id")),
+            "token": (telegram_config.get("token") or "").strip(),
+            "events": [str(e).strip() for e in telegram_config.get("events", []) if str(e).strip()],
+            "disable_notification": bool(telegram_config.get("disable_notification", False)),
+        },
+        "discord": {
+            "webhook_api": (discord_config.get("webhook_api") or "").strip(),
+            "events": [str(e).strip() for e in discord_config.get("events", []) if str(e).strip()],
+        },
+    }
 
 
 def read_log_tail(lines: int = 200) -> list[str]:
@@ -612,7 +598,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <form method="post" action="{{ url_for('save_login') }}">
 <label>Username</label><input name="username" value="{{ config.get('username', '') }}">
 <label>Password</label><input name="password" type="password" value="{{ config.get('password', '') }}">
-<label>auth-token (optional)</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>auth-token (optional)</label><input name="auth_token" type="password" autocomplete="off" value="{{ config.get('auth_token', '') }}">
 <p class="meta">Wenn Twitch-Login per Passwort blockiert ist (z. B. HTTP 404), nutze auth-token + optional persistent-ID aus deinen Browser-Cookies.</p>
 <p class="meta">Token holen: In Twitch eingeloggt <strong>F12 → Konsole</strong> öffnen und folgenden Befehl ausführen:</p>
 <div class="copy-box"><input id="token-command" readonly value="document.cookie.split('; ').find(c => c.startsWith('auth-token='))?.split('=')[1]"><button type="button" class="button-secondary" onclick="copyTokenCommand()">Befehl kopieren</button></div>
@@ -628,7 +614,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 {% endfor %}</pre>
 <h3>Cookie-Import</h3>
 <form method="post" action="{{ url_for('save_cookies') }}">
-<label>auth-token</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>auth-token</label><input name="auth_token" type="password" autocomplete="off" value="{{ config.get('auth_token', '') }}">
 <label>persistent (optional User-ID)</label><input name="persistent" value="{{ config.get('persistent', '') }}">
 <button type="submit">Cookies speichern und übernehmen</button></form>
 <form method="post" action="{{ url_for('import_cookie_file') }}">
@@ -651,35 +637,14 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div><label>Bet Strategy</label><select name="bet_strategy">{% for option in bet_strategies %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
 <div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
 <div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div></div></div>
-<h3>Streamer-Overrides</h3>
-<p class="meta">Optional pro Kanal individuelle Settings setzen. Leer = globale Defaults aus der Hauptkonfiguration.</p>
-{% for streamer_name in config.get('streamers', []) %}
-{% set key = streamer_name.lower() %}
-{% set ov = config.get('streamer_overrides', {}).get(key, {}) %}
-{% set ov_bet = ov.get('bet', {}) %}
-<div class="card" style="background:#141a26;margin-top:10px;">
-<h4 style="margin-top:0;">{{ streamer_name }}</h4>
-<div class="row">
-<div><label><input type="checkbox" name="ov_{{ key }}_make_predictions" {% if ov.get('make_predictions', config.get('make_predictions', True)) %}checked{% endif %}> make_predictions</label></div>
-<div><label><input type="checkbox" name="ov_{{ key }}_follow_raid" {% if ov.get('follow_raid', config.get('follow_raid', True)) %}checked{% endif %}> follow_raid</label></div>
+<h3>Telegram</h3>
+<div class="row"><div><label>Chat ID</label><input name="telegram_chat_id" value="{{ config.get('telegram', {}).get('chat_id', '') }}"></div><div><label>Token</label><input name="telegram_token" type="password" autocomplete="off" value="{{ config.get('telegram', {}).get('token', '') }}"></div></div>
+<div class="row"><div><label>Events (kommagetrennt)</label><input name="telegram_events" value="{{ ','.join(config.get('telegram', {}).get('events', [])) }}"></div><div><label><input type="checkbox" name="telegram_disable_notification" {% if config.get('telegram', {}).get('disable_notification') %}checked{% endif %}> Disable Notification</label></div></div>
+<h3>Discord</h3>
+<div class="row"><div><label>Webhook API</label><input name="discord_webhook_api" type="password" autocomplete="off" value="{{ config.get('discord', {}).get('webhook_api', '') }}"></div><div><label>Events (kommagetrennt)</label><input name="discord_events" value="{{ ','.join(config.get('discord', {}).get('events', [])) }}"></div></div>
+<div class="button-row">
+<button type="submit" formaction="{{ url_for('send_test_message') }}" formmethod="post" class="button-secondary">Testnachricht senden</button>
 </div>
-<div class="row">
-<div><label><input type="checkbox" name="ov_{{ key }}_claim_drops" {% if ov.get('claim_drops', config.get('claim_drops', True)) %}checked{% endif %}> claim_drops</label></div>
-<div><label><input type="checkbox" name="ov_{{ key }}_watch_streak" {% if ov.get('watch_streak', config.get('watch_streak', True)) %}checked{% endif %}> watch_streak</label></div>
-</div>
-<div class="row">
-<div><label>chat</label><select name="ov_{{ key }}_chat">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if ov.get('chat', config.get('chat_presence', 'ONLINE')) == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
-<div><label>bet.strategy</label><select name="ov_{{ key }}_bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if ov_bet.get('strategy', config.get('bet', {}).get('strategy', 'SMART')) == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
-</div>
-<div class="row">
-<div><label>bet.percentage</label><input name="ov_{{ key }}_bet_percentage" type="number" min="1" max="100" value="{{ ov_bet.get('percentage', config.get('bet', {}).get('percentage', 5)) }}"></div>
-<div><label>bet.max_points</label><input name="ov_{{ key }}_bet_max_points" type="number" min="1" value="{{ ov_bet.get('max_points', config.get('bet', {}).get('max_points', 50000)) }}"></div>
-</div>
-<div class="row">
-<div><label>bet.minimum_points</label><input name="ov_{{ key }}_bet_minimum_points" type="number" min="0" value="{{ ov_bet.get('minimum_points', config.get('bet', {}).get('minimum_points', 0)) }}"></div><div></div>
-</div>
-</div>
-{% endfor %}
 <button type="submit">Speichern</button></form></div>
 
 <div class="card"><h2>Status</h2>
@@ -800,7 +765,16 @@ def save() -> Any:
             "max_points": int(request.form.get("bet_max_points", 50000)),
             "minimum_points": int(request.form.get("bet_minimum_points", 0)),
         },
-        "streamer_overrides": streamer_overrides,
+        "telegram": {
+            "chat_id": request.form.get("telegram_chat_id", "").strip(),
+            "token": request.form.get("telegram_token", "").strip(),
+            "events": _parse_events(request.form.get("telegram_events", "")),
+            "disable_notification": request.form.get("telegram_disable_notification") == "on",
+        },
+        "discord": {
+            "webhook_api": request.form.get("discord_webhook_api", "").strip(),
+            "events": _parse_events(request.form.get("discord_events", "")),
+        },
     }
     save_config(config)
     return redirect(url_for("index"))
@@ -950,6 +924,46 @@ def api_miner_restart() -> Any:
     payload = MINER_MANAGER.get_status()
     payload.update({"success": success, "message": message})
     return jsonify(payload), (200 if success else 409)
+
+
+@app.post("/send-test-message")
+def send_test_message() -> Any:
+    config = load_config()
+    payload = build_logger_settings_payload(config)
+    errors: list[str] = []
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    text = f"WebUI Testnachricht ({now})"
+
+    telegram_data = payload["telegram"]
+    if telegram_data["chat_id"] and telegram_data["token"]:
+        try:
+            Telegram(
+                chat_id=telegram_data["chat_id"],
+                token=telegram_data["token"],
+                events=telegram_data["events"],
+                disable_notification=telegram_data["disable_notification"],
+            ).send(text, "WATCH_STREAK")
+        except Exception as exc:
+            errors.append(f"Telegram Fehler: {exc.__class__.__name__}")
+    else:
+        errors.append("Telegram nicht konfiguriert (chat_id/token fehlen).")
+
+    discord_data = payload["discord"]
+    if discord_data["webhook_api"]:
+        try:
+            Discord(webhook_api=discord_data["webhook_api"], events=discord_data["events"]).send(text, "WATCH_STREAK")
+        except Exception as exc:
+            errors.append(f"Discord Fehler: {exc.__class__.__name__}")
+    else:
+        errors.append("Discord nicht konfiguriert (webhook_api fehlt).")
+
+    message = "Testnachricht gesendet." if not errors else " | ".join(errors)
+    return redirect(url_for("index", miner_message=message))
+
+
+@app.get("/api/config/logger-settings")
+def api_logger_settings() -> Any:
+    return jsonify(build_logger_settings_payload(load_config()))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("WEBUI_PORT", "8080")), debug=False)
