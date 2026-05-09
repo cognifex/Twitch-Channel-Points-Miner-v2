@@ -318,7 +318,7 @@ class TwitchChannelPointsMiner:
                     category,
                     extra={"emoji": ":no_entry_sign:"},
                 )
-                self.end()
+                self.end(signum=None, frame=None)
                 _exit_on_fatal_login_if_enabled(category)
                 return
 
