@@ -147,6 +147,7 @@ class TwitchChannelPointsMiner:
         "logs_file",
         "queue_listener",
         "login_mode",
+        "_is_shutting_down",
     ]
 
     def __init__(
@@ -210,6 +211,7 @@ class TwitchChannelPointsMiner:
         self.logs_file, self.queue_listener = configure_loggers(
             self.username, logger_settings
         )
+        self._is_shutting_down = False
 
         # Check for the latest version of the script
         current_version, github_version = check_versions()
@@ -274,7 +276,12 @@ class TwitchChannelPointsMiner:
                     exc,
                     extra={"emoji": ":no_entry_sign:"},
                 )
-                self.end()
+                if category == LOGIN_ERROR_CATEGORY_MISSING_COOKIES:
+                    logger.error(
+                        "Missing cookies detected. Please provide a valid cookie file before restarting.",
+                        extra={"emoji": ":cookie:"},
+                    )
+                self.end(exit_code=LOGIN_ERROR_EXIT_CODES.get(category, 0))
                 _exit_on_fatal_login_if_enabled(category)
                 return
 
@@ -451,8 +458,16 @@ class TwitchChannelPointsMiner:
                                 self.streamers[index]
                             )
 
-    def end(self, signum, frame):
-        logger.info("CTRL+C Detected! Please wait just a moment!")
+    def end(self, signum=None, frame=None, exit_code=0):
+        if self._is_shutting_down:
+            logger.debug("Shutdown already in progress; skipping duplicate end() call.")
+            return
+
+        self._is_shutting_down = True
+        if signum is not None:
+            logger.info("Signal %s detected. Please wait just a moment!", signum)
+        else:
+            logger.info("Shutdown requested. Please wait just a moment!")
 
         for streamer in self.streamers:
             if (
@@ -485,7 +500,7 @@ class TwitchChannelPointsMiner:
         # Stop the queue listener to make sure all messages have been logged
         self.queue_listener.stop()
 
-        sys.exit(0)
+        raise SystemExit(exit_code)
 
     def __print_report(self):
         print("\n")
