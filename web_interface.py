@@ -14,6 +14,7 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 import requests
 
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
+from TwitchChannelPointsMiner.classes.Settings import Priority
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 from TwitchChannelPointsMiner.classes.entities.Bet import Condition, DelayMode, OutcomeKeys, Strategy
 
@@ -32,11 +33,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "persistent": "",
     "cookie_file": "",
     "streamers": [],
+    "blacklist": [],
     "make_predictions": True,
     "follow_raid": True,
     "claim_drops": True,
     "watch_streak": True,
     "chat_presence": "ONLINE",
+    "priority": ["STREAK", "DROPS", "ORDER"],
     "proxy": "",
     "autostart_mode": "enabled",
     "max_login_tries": 3,
@@ -112,8 +115,10 @@ class MinerProcessManager:
             try:
                 current_config = load_config()
                 login_mode = _sanitize_login_mode(current_config.get("login_mode"))
+                mapped_priority = _map_priority_values(current_config.get("priority", DEFAULT_CONFIG["priority"]))
                 process_env = os.environ.copy()
                 process_env["TWITCH_LOGIN_MODE"] = login_mode
+                process_env["TWITCH_PRIORITY"] = json.dumps([item.name for item in mapped_priority])
 
                 self._process = subprocess.Popen(  # noqa: S603
                     self.command,
@@ -163,6 +168,7 @@ class MinerProcessManager:
 MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
 
 VALID_LOGIN_MODES = {"none", "token", "credentials"}
+PRIORITY_UI_OPTIONS = ["STREAK", "DROPS", "ORDER", "POINTS_ASCENDING", "POINTS_DESCEDING", "SUBSCRIBED"]
 
 BET_STRATEGIES = [strategy.name for strategy in Strategy]
 DELAY_MODES = [mode.name for mode in DelayMode]
@@ -284,6 +290,31 @@ def _parse_and_validate_bet_settings(form: dict[str, str], existing_bet: dict[st
 def _sanitize_login_mode(value: str | None) -> str:
     mode = (value or "token").strip().lower()
     return mode if mode in VALID_LOGIN_MODES else "token"
+
+
+def _map_priority_values(values: list[str] | Any) -> list[Priority]:
+    if not isinstance(values, list):
+        return [Priority.STREAK, Priority.DROPS, Priority.ORDER]
+    mapped: list[Priority] = []
+    for raw in values:
+        key = str(raw or "").strip().upper()
+        if key in Priority.__members__:
+            mapped.append(Priority[key])
+    return mapped or [Priority.STREAK, Priority.DROPS, Priority.ORDER]
+
+
+def _validate_priority(values: list[str] | Any) -> list[str]:
+    selected = [str(v).strip().upper() for v in values] if isinstance(values, list) else []
+    warnings: list[str] = []
+    if not selected:
+        return ["Keine Priorität gewählt. Empfohlen: STREAK, DROPS, ORDER."]
+    if "ORDER" in selected and ("POINTS_ASCENDING" in selected or "POINTS_DESCEDING" in selected):
+        warnings.append("ORDER zusammen mit POINTS_ASCENDING/POINTS_DESCEDING ist widersprüchlich.")
+    if "POINTS_ASCENDING" in selected and "POINTS_DESCEDING" in selected:
+        warnings.append("POINTS_ASCENDING und POINTS_DESCEDING gleichzeitig ist widersprüchlich.")
+    if "STREAK" in selected and len(selected) == 1:
+        warnings.append("Nur STREAK kann nach erfüllten Streaks zu Leerlauf führen.")
+    return warnings
 
 
 def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, Any]:
@@ -511,6 +542,9 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 .meta { color: #97a0bb; font-size: 0.9rem; }
 .copy-box { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
 .copy-box input { margin: 0; font-family: monospace; }
+.priority-controls { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+.priority-buttons { display: flex; flex-direction: column; gap: 8px; }
+.warning { color: #ffd77d; }
 </style></head><body><div class="container">
 <h1>Twitch Channel Points Miner – Webinterface</h1>
 <p class="meta">Config-Datei: {{ config_path }} | Log-Datei: {{ log_path }}</p>
@@ -551,6 +585,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="row"><div><label>Autostart-Modus</label><select name="autostart_mode"><option value="disabled" {% if config.get('autostart_mode', 'enabled') == 'disabled' %}selected{% endif %}>Aus (manuell)</option><option value="enabled" {% if config.get('autostart_mode', 'enabled') == 'enabled' %}selected{% endif %}>An</option><option value="max_tries" {% if config.get('autostart_mode', 'enabled') == 'max_tries' %}selected{% endif %}>An mit Max Login-Trys</option></select></div>
 <div><label>Max Login-Trys (nur Modus "max_tries")</label><input name="max_login_tries" type="number" min="1" value="{{ config.get('max_login_tries', 3) }}"></div></div>
 <label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
+<label>Blacklist (kommagetrennt oder zeilenweise)</label><input name="blacklist" value="{{ ','.join(config.get('blacklist', [])) }}">
 <div class="row"><div><label>Login-Modus</label><select name="login_mode"><option value="token" {% if config.get('login_mode', 'token') == 'token' %}selected{% endif %}>token (empfohlen)</option><option value="credentials" {% if config.get('login_mode', 'token') == 'credentials' %}selected{% endif %}>credentials</option><option value="none" {% if config.get('login_mode', 'token') == 'none' %}selected{% endif %}>none</option></select></div><div></div></div>
 <p class="meta"><strong>token</strong>: Start nur über vorhandene Cookies/Token (ideal für Container ohne interaktiven Login). <strong>credentials</strong>: erlaubt Username/Passwort-Login beim Start (lokal/interaktiv). <strong>none</strong>: überspringt Startup-Login komplett; nutze das nur, wenn Session/Cookies bereits vorbereitet sind.</p>
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
@@ -575,6 +610,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 {% if miner_status.last_error %}<p style="color:#ff9f9f">Letzter Fehler: {{ miner_status.last_error }}</p>{% endif %}
 <p class="meta">Startkommando: {{ miner_status.command }}</p>
 {% if miner_action_message %}<p class="meta">Aktion: {{ miner_action_message }}</p>{% endif %}
+<p>Blacklist aktiv: <strong>{% if config.get('blacklist') %}{{ config.get('blacklist')|join(', ') }}{% else %}keine{% endif %}</strong></p>
 <p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
 <div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
@@ -586,6 +622,25 @@ function copyTokenCommand() {
   tokenInput.setSelectionRange(0, 99999);
   navigator.clipboard.writeText(tokenInput.value);
 }
+function syncPriorityOrder() {
+  const select = document.getElementById("priority_select");
+  document.getElementById("priority_order").value = Array.from(select.options).filter(o => o.selected).map(o => o.value).join(",");
+}
+function movePriority(direction) {
+  const select = document.getElementById("priority_select");
+  const idx = select.selectedIndex;
+  if (idx < 0) return;
+  const target = idx + direction;
+  if (target < 0 || target >= select.options.length) return;
+  const a = select.options[idx];
+  const b = select.options[target];
+  select.options[idx] = new Option(b.text, b.value, false, b.selected);
+  select.options[target] = new Option(a.text, a.value, false, a.selected);
+  select.selectedIndex = target;
+  syncPriorityOrder();
+}
+document.getElementById("priority_select")?.addEventListener("change", syncPriorityOrder);
+document.querySelector("form[action='{{ url_for('save') }}']")?.addEventListener("submit", syncPriorityOrder);
 </script>
 </body></html>
 """
@@ -618,7 +673,8 @@ def index() -> str:
 
 @app.post("/save")
 def save() -> Any:
-    streamers = [s.strip() for s in request.form.get("streamers", "").split(",") if s.strip()]
+    streamers = _parse_tag_list(request.form.get("streamers", ""))
+    blacklist = _parse_tag_list(request.form.get("blacklist", ""))
     existing = load_config()
     try:
         bet_config = _parse_and_validate_bet_settings(request.form, _normalize_bet_config(existing.get("bet", {})))
@@ -632,7 +688,9 @@ def save() -> Any:
         "persistent": existing.get("persistent", ""),
         "cookie_file": existing.get("cookie_file", ""),
         "streamers": streamers,
+        "blacklist": blacklist,
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
+        "priority": priority_values or existing.get("priority", DEFAULT_CONFIG["priority"]),
         "proxy": request.form.get("proxy", "").strip(),
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
         "max_login_tries": max(1, int(request.form.get("max_login_tries", 3))),
