@@ -14,6 +14,7 @@ import requests
 
 from TwitchChannelPointsMiner.classes.Exceptions import (
     BadCredentialsException,
+    LoginResponseParseException,
     WrongCookiesException,
 )
 from TwitchChannelPointsMiner.constants import GQLOperations
@@ -186,16 +187,8 @@ class TwitchLogin(object):
         try:
             parsed_response = response.json()
         except (requests.exceptions.JSONDecodeError, ValueError):
-            content_type = response.headers.get("content-type", "")
-            logger.warning(
-                "Twitch login endpoint returned invalid JSON "
-                "(status=%s, content_type=%s). "
-                "Falling back to browser login flow.",
-                response.status_code,
-                content_type or "unknown",
-            )
-            logger.debug(
-                "Raw Twitch login response (first 500 chars): %s", body[:500]
+            self._log_response_diagnostics(
+                response, body, "Twitch login endpoint returned invalid JSON."
             )
             return {"error_code": 1000}
 
@@ -207,6 +200,16 @@ class TwitchLogin(object):
             return {"error_code": 1000}
 
         return parsed_response
+
+    def _log_response_diagnostics(self, response, body, reason):
+        content_type = response.headers.get("content-type", "") or "unknown"
+        logger.warning(
+            "%s status=%s content_type=%s body_preview=%r",
+            reason,
+            response.status_code,
+            content_type,
+            body[:500],
+        )
 
     def login_flow_backup(self):
         """Backup OAuth login flow in case manual captcha solving is required"""
@@ -288,10 +291,26 @@ class TwitchLogin(object):
     def __set_user_id(self):
         json_data = copy.deepcopy(GQLOperations.ReportMenuItem)
         json_data["variables"] = {"channelLogin": self.username}
-        response = self.session.post(GQLOperations.url, json=json_data)
+        try:
+            response = self.session.post(GQLOperations.url, json=json_data, timeout=30)
+        except requests.RequestException as exc:
+            raise LoginResponseParseException(
+                f"Failed to call Twitch GraphQL endpoint while resolving user id: {exc}"
+            ) from exc
 
         if response.status_code == 200:
-            json_response = response.json()
+            body = response.text.strip()
+            try:
+                json_response = response.json()
+            except (requests.exceptions.JSONDecodeError, ValueError) as exc:
+                self._log_response_diagnostics(
+                    response,
+                    body,
+                    "Twitch GraphQL endpoint returned invalid JSON while resolving user id.",
+                )
+                raise LoginResponseParseException(
+                    "Invalid JSON response from Twitch GraphQL endpoint while resolving user id."
+                ) from exc
             if (
                 "data" in json_response
                 and "user" in json_response["data"]
@@ -299,6 +318,13 @@ class TwitchLogin(object):
             ):
                 self.user_id = json_response["data"]["user"]["id"]
                 return True
+        else:
+            body = response.text.strip()
+            self._log_response_diagnostics(
+                response,
+                body,
+                "Twitch GraphQL endpoint failed while resolving user id.",
+            )
         return False
 
     def get_auth_token(self):
