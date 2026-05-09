@@ -306,8 +306,13 @@ Use `login_mode` to choose how startup authentication behaves:
 | Mode | Behavior | Recommended use |
 | ---- | -------- | --------------- |
 | `none` | Starts without attempting login. | Diagnostics only (no authenticated actions). |
-| `token` | Requires `cookies/<username>.pkl` and logs in via stored cookie/token. | **Default mode** for stable and non-interactive runs. |
+| `token` | Requires `cookies/<username>.pkl` and logs in via stored cookie/token. Falls back to `.env` variable `TWITCH_AUTH_TOKEN` if no cookie file exists. | **Default mode** for stable and non-interactive runs. |
 | `credentials` | Attempts interactive/credential-based login when needed. | Optional local fallback, not the default. |
+
+
+If you cannot mount a cookie file, you can set `TWITCH_AUTH_TOKEN` in `.env` as a startup fallback in token mode.
+
+For WebUI-first recovery flows, set `TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE=1` (default) so the miner process stays alive instead of exiting when login fails.
 
 ### Create and provide `cookies/<username>.pkl`
 
@@ -721,3 +726,5 @@ Webinterface:
 - Login- und Streamer-Status werden aus den Log-Zeilen erkannt und im UI angezeigt
 
 Hinweis: Das Webinterface schreibt **keine** `run.py` automatisch um, sondern pflegt eine separate `config.json`, die du für deine eigene `run.py` verwenden kannst.
+
+If startup keeps showing old stack traces after pulling updates, rebuild images explicitly: `docker compose up -d --build --force-recreate`.
