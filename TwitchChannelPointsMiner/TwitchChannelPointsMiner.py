@@ -193,6 +193,15 @@ class TwitchChannelPointsMiner:
                 self.end()
                 return
 
+            auth_token = self.twitch.twitch_login.get_auth_token()
+            if not auth_token:
+                logger.error(
+                    "No Twitch auth token available. Start aborted because auto_login is disabled or login did not complete.",
+                    extra={"emoji": ":no_entry_sign:"},
+                )
+                self.end()
+                return
+
             if self.claim_drops_startup is True:
                 self.twitch.claim_all_drops_from_inventory()
 
