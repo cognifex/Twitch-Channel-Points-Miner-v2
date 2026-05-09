@@ -268,7 +268,7 @@ class TwitchChannelPointsMiner:
 
             max_login_tries = max(1, int(os.getenv("TCPM_LOGIN_MAX_TRIES", "1")))
             retry_delay_seconds = max(1, int(os.getenv("TCPM_LOGIN_RETRY_DELAY", "20")))
-            keep_alive_on_login_failure = os.getenv("TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+            keep_alive_on_login_failure = os.getenv("TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE", "1").strip().lower() in {"1", "true", "yes", "on"}
             login_exception = None
 
             for attempt in range(1, max_login_tries + 1):
@@ -306,7 +306,7 @@ class TwitchChannelPointsMiner:
                     )
                     while True:
                         time.sleep(30)
-                self.end(exit_code=LOGIN_ERROR_EXIT_CODES.get(category, 0))
+                self.end(signum=None, frame=None, exit_code=LOGIN_ERROR_EXIT_CODES.get(category, 0))
                 _exit_on_fatal_login_if_enabled(category)
                 return
 
@@ -318,7 +318,7 @@ class TwitchChannelPointsMiner:
                     category,
                     extra={"emoji": ":no_entry_sign:"},
                 )
-                self.end()
+                self.end(signum=None, frame=None)
                 _exit_on_fatal_login_if_enabled(category)
                 return
 
@@ -483,7 +483,7 @@ class TwitchChannelPointsMiner:
                                 self.streamers[index]
                             )
 
-    def end(self, signum=None, frame=None, exit_code=0):
+    def end(self, signum=None, frame=None, exit_code=0, *_, **__):
         if self._is_shutting_down:
             logger.debug("Shutdown already in progress; skipping duplicate end() call.")
             return
