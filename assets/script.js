@@ -85,6 +85,7 @@ var annotations = [];
 
 var streamersList = [];
 var sortBy = "Name ascending";
+var liveStatusRefreshInterval = 60000;
 
 var startDate = new Date();
 startDate.setDate(startDate.getDate() - daysAgo);
@@ -106,10 +107,44 @@ $(document).ready(function () {
     sortBy = localStorage.getItem("sort-by");
     $('#sorting-by').text(sortBy);
     getStreamers();
+    loadLiveStreamerList();
 
     updateAnnotations();
     toggleDarkMode();
 });
+
+function loadLiveStreamerList() {
+    $.getJSON('./api/favorites/live-status', function (response) {
+        var favorites = response.favorites || [];
+        renderLiveStreamerList(favorites);
+        setTimeout(loadLiveStreamerList, liveStatusRefreshInterval);
+    }).fail(function () {
+        setTimeout(loadLiveStreamerList, liveStatusRefreshInterval);
+    });
+}
+
+function renderLiveStreamerList(favorites) {
+    var list = $('#live-streamers-list');
+    list.empty();
+
+    if (favorites.length === 0) {
+        list.append('<li>Keine Favoriten gefunden</li>');
+        return;
+    }
+
+    favorites.forEach((favorite) => {
+        var safeTitle = favorite.title ? ` - ${favorite.title}` : '';
+        var viewers = favorite.online ? ` (${favorite.viewer_count})` : '';
+        list.append(`
+            <li class="live-streamer-item">
+                <span class="live-dot ${favorite.online ? 'online' : 'offline'}"></span>
+                <a href="${favorite.url}" target="_blank" rel="noopener noreferrer">
+                    ${favorite.username}${favorite.online ? ' 🔴 LIVE' : ''}${viewers}${safeTitle}
+                </a>
+            </li>
+        `);
+    });
+}
 
 function formatDate(date) {
     var d = new Date(date),
