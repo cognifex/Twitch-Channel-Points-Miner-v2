@@ -146,6 +146,21 @@ class MinerProcessManager:
                 process_env = os.environ.copy()
                 process_env["TWITCH_LOGIN_MODE"] = login_mode
                 process_env["TWITCH_PRIORITY"] = json.dumps([item.name for item in mapped_priority])
+                process_env["TCPM_LOGS_DIR"] = "/data/logs"
+
+                autostart_mode = str(current_config.get("autostart_mode", "enabled")).strip().lower()
+                max_login_tries = max(1, int(current_config.get("max_login_tries", 3)))
+                process_env["TCPM_LOGIN_MAX_TRIES"] = str(max_login_tries)
+                if autostart_mode == "disabled":
+                    process_env["TWITCH_LOGIN_MODE"] = "none"
+                if autostart_mode in {"enabled", "max_tries"}:
+                    process_env["TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE"] = "1"
+                else:
+                    process_env["TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE"] = "0"
+
+                auth_token = str(current_config.get("auth_token", "")).strip()
+                if auth_token:
+                    process_env["TWITCH_AUTH_TOKEN"] = auth_token
 
                 autostart_mode = str(current_config.get("autostart_mode", "enabled")).strip().lower()
                 max_login_tries = max(1, int(current_config.get("max_login_tries", 3)))
