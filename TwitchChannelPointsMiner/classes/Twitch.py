@@ -78,9 +78,20 @@ class Twitch(object):
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
             return
 
+        env_auth_token = os.getenv("TWITCH_AUTH_TOKEN", "").strip()
+        if env_auth_token:
+            logger.info("Using TWITCH_AUTH_TOKEN from environment as startup fallback.")
+            self.twitch_login.set_token(env_auth_token)
+            if self.twitch_login.check_login():
+                logger.info("Environment token login successful.")
+                return
+            raise BadCredentialsException(
+                "TWITCH_AUTH_TOKEN was provided but Twitch rejected it."
+            )
+
         if self.login_mode == "token":
             raise BadCredentialsException(
-                "Token-based login is enabled by default, but no cookie file was found. "
+                "Token-based login is enabled by default, but no cookie file was found and no TWITCH_AUTH_TOKEN was set. "
                 f"Please provide cookies at: {self.cookies_file}"
             )
 
