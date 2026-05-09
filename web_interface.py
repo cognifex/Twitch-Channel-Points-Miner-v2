@@ -11,11 +11,24 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from werkzeug.serving import make_server
 
 import requests
 
+from TwitchChannelPointsMiner.classes.AnalyticsServer import (
+    favorites_live_status,
+    index as analytics_index,
+    json_all,
+    read_json,
+    streamers as analytics_streamers,
+)
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
+from TwitchChannelPointsMiner.classes.Telegram import Telegram
+from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
+from TwitchChannelPointsMiner.classes.Chat import ChatPresence
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
+from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
 
 app = Flask(__name__)
 
@@ -32,11 +45,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "persistent": "",
     "cookie_file": "",
     "streamers": [],
+    "blacklist": [],
     "make_predictions": True,
     "follow_raid": True,
     "claim_drops": True,
     "watch_streak": True,
     "chat_presence": "ONLINE",
+    "priority": ["STREAK", "DROPS", "ORDER"],
     "proxy": "",
     "autostart_mode": "enabled",
     "max_login_tries": 3,
@@ -44,9 +59,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bet": {
         "strategy": "SMART",
         "percentage": 5,
+        "percentage_gap": 20,
         "max_points": 50000,
         "minimum_points": 0,
+        "stealth_mode": False,
+        "delay_mode": "FROM_END",
+        "delay": 6,
     },
+    "telegram": {
+        "chat_id": "",
+        "token": "",
+        "events": ["BET_WIN", "BET_LOSE"],
+        "disable_notification": False,
+    },
+    "discord": {
+        "webhook_api": "",
+        "events": ["BET_WIN", "BET_LOSE"],
+    },
+    "analytics": {"host": "127.0.0.1", "port": 5000, "refresh": 5, "days_ago": 7},
 }
 
 
@@ -108,8 +138,10 @@ class MinerProcessManager:
             try:
                 current_config = load_config()
                 login_mode = _sanitize_login_mode(current_config.get("login_mode"))
+                mapped_priority = _map_priority_values(current_config.get("priority", DEFAULT_CONFIG["priority"]))
                 process_env = os.environ.copy()
                 process_env["TWITCH_LOGIN_MODE"] = login_mode
+                process_env["TWITCH_PRIORITY"] = json.dumps([item.name for item in mapped_priority])
 
                 self._process = subprocess.Popen(  # noqa: S603
                     self.command,
@@ -158,7 +190,181 @@ class MinerProcessManager:
 
 MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
 
+
+class AnalyticsServerManager:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = "stopped"
+        self._last_error = ""
+        self._thread: threading.Thread | None = None
+        self._server: Any = None
+        self._host = "127.0.0.1"
+        self._port = 5000
+
+    def _build_app(self, refresh: int, days_ago: int) -> Flask:
+        analytics_app = Flask("analytics-webui")
+        analytics_app.add_url_rule("/", "index", analytics_index, defaults={"refresh": refresh, "days_ago": days_ago}, methods=["GET"])
+        analytics_app.add_url_rule("/streamers", "streamers", analytics_streamers, methods=["GET"])
+        analytics_app.add_url_rule("/json/<string:streamer>", "json", read_json, methods=["GET"])
+        analytics_app.add_url_rule("/json_all", "json_all", json_all, methods=["GET"])
+        analytics_app.add_url_rule("/api/favorites/live-status", "favorites_live_status", favorites_live_status, methods=["GET"])
+        return analytics_app
+
+    def get_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {"state": self._state, "host": self._host, "port": self._port, "last_error": self._last_error}
+
+    def start(self, host: str, port: int, refresh: int, days_ago: int) -> tuple[bool, str]:
+        with self._lock:
+            if self._state == "running":
+                return False, "Analytics-Server läuft bereits."
+            try:
+                analytics_app = self._build_app(refresh, days_ago)
+                self._server = make_server(host, port, analytics_app, threaded=True)
+                self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+                self._thread.start()
+                self._state = "running"
+                self._host = host
+                self._port = port
+                self._last_error = ""
+                return True, "Analytics-Server wurde gestartet."
+            except Exception as exc:
+                self._state = "error"
+                self._last_error = f"Start fehlgeschlagen: {exc.__class__.__name__}"
+                return False, self._last_error
+
+    def stop(self) -> tuple[bool, str]:
+        with self._lock:
+            if self._state != "running" or self._server is None:
+                self._state = "stopped"
+                return False, "Analytics-Server läuft nicht."
+            self._server.shutdown()
+            self._server = None
+            self._thread = None
+            self._state = "stopped"
+            return True, "Analytics-Server wurde gestoppt."
+
+
+ANALYTICS_MANAGER = AnalyticsServerManager()
+
 VALID_LOGIN_MODES = {"none", "token", "credentials"}
+PRIORITY_UI_OPTIONS = ["STREAK", "DROPS", "ORDER", "POINTS_ASCENDING", "POINTS_DESCEDING", "SUBSCRIBED"]
+
+BET_STRATEGIES = [strategy.name for strategy in Strategy]
+DELAY_MODES = [mode.name for mode in DelayMode]
+FILTER_BY_OPTIONS = [
+    OutcomeKeys.PERCENTAGE_USERS,
+    OutcomeKeys.ODDS_PERCENTAGE,
+    OutcomeKeys.ODDS,
+    OutcomeKeys.TOP_POINTS,
+    OutcomeKeys.TOTAL_USERS,
+    OutcomeKeys.TOTAL_POINTS,
+    OutcomeKeys.DECISION_USERS,
+    OutcomeKeys.DECISION_POINTS,
+]
+FILTER_WHERE_OPTIONS = [condition.name for condition in Condition]
+
+
+def _sanitize_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _normalize_bet_config(bet: dict[str, Any] | None) -> dict[str, Any]:
+    bet = dict(bet or {})
+    strategy = str(bet.get("strategy", "SMART")).strip().upper()
+    if strategy not in BET_STRATEGIES:
+        strategy = "SMART"
+    delay_mode = str(bet.get("delay_mode", "FROM_END")).strip().upper()
+    if delay_mode not in DELAY_MODES:
+        delay_mode = "FROM_END"
+
+    filter_condition = bet.get("filter_condition")
+    normalized_filter = None
+    if isinstance(filter_condition, dict):
+        by = str(filter_condition.get("by", "")).strip()
+        where = str(filter_condition.get("where", "")).strip().upper()
+        value = filter_condition.get("value")
+        if by in FILTER_BY_OPTIONS and where in FILTER_WHERE_OPTIONS and str(value).strip() != "":
+            normalized_filter = {"by": by, "where": where, "value": float(value)}
+
+    normalized = {
+        "strategy": strategy,
+        "percentage": int(bet.get("percentage", 5)),
+        "percentage_gap": int(bet.get("percentage_gap", 20)),
+        "max_points": int(bet.get("max_points", 50000)),
+        "minimum_points": int(bet.get("minimum_points", 0)),
+        "stealth_mode": bool(bet.get("stealth_mode", False)),
+        "delay_mode": delay_mode,
+        "delay": float(bet.get("delay", 6)),
+    }
+    if normalized_filter is not None:
+        normalized["filter_condition"] = normalized_filter
+    return normalized
+
+
+def _parse_and_validate_bet_settings(form: dict[str, str], existing_bet: dict[str, Any]) -> dict[str, Any]:
+    strategy = str(form.get("bet_strategy", existing_bet.get("strategy", "SMART"))).strip().upper()
+    if strategy not in BET_STRATEGIES:
+        raise ValueError("Ungültige Bet-Strategie.")
+
+    percentage = int(form.get("bet_percentage", existing_bet.get("percentage", 5)))
+    percentage_gap = int(form.get("bet_percentage_gap", existing_bet.get("percentage_gap", 20)))
+    max_points = int(form.get("bet_max_points", existing_bet.get("max_points", 50000)))
+    minimum_points = int(form.get("bet_minimum_points", existing_bet.get("minimum_points", 0)))
+    stealth_mode = _sanitize_bool(form.get("bet_stealth_mode"), bool(existing_bet.get("stealth_mode", False)))
+    delay_mode = str(form.get("bet_delay_mode", existing_bet.get("delay_mode", "FROM_END"))).strip().upper()
+    delay = float(form.get("bet_delay", existing_bet.get("delay", 6)))
+
+    if delay_mode not in DELAY_MODES:
+        raise ValueError("Ungültiger Delay-Modus.")
+    if not 1 <= percentage <= 100:
+        raise ValueError("Bet Percentage muss zwischen 1 und 100 liegen.")
+    if percentage_gap < 0:
+        raise ValueError("Percentage Gap muss >= 0 sein.")
+    if max_points < 1:
+        raise ValueError("Max Points muss >= 1 sein.")
+    if minimum_points < 0:
+        raise ValueError("Minimum Points muss >= 0 sein.")
+    if delay < 0:
+        raise ValueError("Delay muss >= 0 sein.")
+
+    if strategy == "SMART" and percentage_gap <= 0:
+        raise ValueError("SMART benötigt percentage_gap > 0.")
+    if strategy == "PERCENTAGE" and not 1 <= percentage <= 100:
+        raise ValueError("PERCENTAGE benötigt percentage zwischen 1 und 100.")
+
+    filter_by = str(form.get("filter_by", "")).strip()
+    filter_where = str(form.get("filter_where", "")).strip().upper()
+    filter_value_raw = str(form.get("filter_value", "")).strip()
+
+    bet: dict[str, Any] = {
+        "strategy": strategy,
+        "percentage": percentage,
+        "percentage_gap": percentage_gap,
+        "max_points": max_points,
+        "minimum_points": minimum_points,
+        "stealth_mode": stealth_mode,
+        "delay_mode": delay_mode,
+        "delay": delay,
+    }
+
+    has_filter = bool(filter_by or filter_where or filter_value_raw)
+    if has_filter:
+        if filter_by not in FILTER_BY_OPTIONS:
+            raise ValueError("Ungültiges Filterfeld (by).")
+        if filter_where not in FILTER_WHERE_OPTIONS:
+            raise ValueError("Ungültiger Filteroperator (where).")
+        if filter_value_raw == "":
+            raise ValueError("Filterwert (value) fehlt.")
+        bet["filter_condition"] = {
+            "by": filter_by,
+            "where": filter_where,
+            "value": float(filter_value_raw),
+        }
+
+    return bet
 
 
 class RuntimeStatusStore:
@@ -225,6 +431,31 @@ RUNTIME_STATUS = RuntimeStatusStore()
 def _sanitize_login_mode(value: str | None) -> str:
     mode = (value or "token").strip().lower()
     return mode if mode in VALID_LOGIN_MODES else "token"
+
+
+def _map_priority_values(values: list[str] | Any) -> list[Priority]:
+    if not isinstance(values, list):
+        return [Priority.STREAK, Priority.DROPS, Priority.ORDER]
+    mapped: list[Priority] = []
+    for raw in values:
+        key = str(raw or "").strip().upper()
+        if key in Priority.__members__:
+            mapped.append(Priority[key])
+    return mapped or [Priority.STREAK, Priority.DROPS, Priority.ORDER]
+
+
+def _validate_priority(values: list[str] | Any) -> list[str]:
+    selected = [str(v).strip().upper() for v in values] if isinstance(values, list) else []
+    warnings: list[str] = []
+    if not selected:
+        return ["Keine Priorität gewählt. Empfohlen: STREAK, DROPS, ORDER."]
+    if "ORDER" in selected and ("POINTS_ASCENDING" in selected or "POINTS_DESCEDING" in selected):
+        warnings.append("ORDER zusammen mit POINTS_ASCENDING/POINTS_DESCEDING ist widersprüchlich.")
+    if "POINTS_ASCENDING" in selected and "POINTS_DESCEDING" in selected:
+        warnings.append("POINTS_ASCENDING und POINTS_DESCEDING gleichzeitig ist widersprüchlich.")
+    if "STREAK" in selected and len(selected) == 1:
+        warnings.append("Nur STREAK kann nach erfüllten Streaks zu Leerlauf führen.")
+    return warnings
 
 
 def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, Any]:
@@ -400,6 +631,38 @@ def save_config(config: dict[str, Any]) -> None:
         json.dump(config, fp, indent=2)
 
 
+def _parse_events(value: str) -> list[str]:
+    return [event.strip() for event in value.split(",") if event.strip()]
+
+
+def _safe_chat_id(value: str | int | None) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def build_logger_settings_payload(config: dict[str, Any]) -> dict[str, Any]:
+    telegram_config = config.get("telegram", {}) or {}
+    discord_config = config.get("discord", {}) or {}
+
+    return {
+        "telegram": {
+            "chat_id": _safe_chat_id(telegram_config.get("chat_id")),
+            "token": (telegram_config.get("token") or "").strip(),
+            "events": [str(e).strip() for e in telegram_config.get("events", []) if str(e).strip()],
+            "disable_notification": bool(telegram_config.get("disable_notification", False)),
+        },
+        "discord": {
+            "webhook_api": (discord_config.get("webhook_api") or "").strip(),
+            "events": [str(e).strip() for e in discord_config.get("events", []) if str(e).strip()],
+        },
+    }
+
+
 def read_log_tail(lines: int = 200) -> list[str]:
     if not LOG_PATH.exists():
         return ["Noch keine Logs gefunden."]
@@ -429,15 +692,19 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 .meta { color: #97a0bb; font-size: 0.9rem; }
 .copy-box { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
 .copy-box input { margin: 0; font-family: monospace; }
+.priority-controls { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+.priority-buttons { display: flex; flex-direction: column; gap: 8px; }
+.warning { color: #ffd77d; }
 </style></head><body><div class="container">
 <h1>Twitch Channel Points Miner – Webinterface</h1>
 <p class="meta">Config-Datei: {{ config_path }} | Log-Datei: {{ log_path }}</p>
+<p class="meta">Analytics: <a href="{{ analytics_url }}" target="_blank" rel="noopener">{{ analytics_url }}</a> | Health: <strong style="color:{% if analytics_health.reachable %}#7dff9a{% else %}#ff9f9f{% endif %}">{% if analytics_health.reachable %}reachable{% else %}not reachable{% endif %}</strong></p>
 
 <div class="card"><h2>Login</h2>
 <form method="post" action="{{ url_for('save_login') }}">
 <label>Username</label><input name="username" value="{{ config.get('username', '') }}">
 <label>Password</label><input name="password" type="password" value="{{ config.get('password', '') }}">
-<label>auth-token (optional)</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>auth-token (optional)</label><input name="auth_token" type="password" autocomplete="off" value="{{ config.get('auth_token', '') }}">
 <p class="meta">Wenn Twitch-Login per Passwort blockiert ist (z. B. HTTP 404), nutze auth-token + optional persistent-ID aus deinen Browser-Cookies.</p>
 <p class="meta">Token holen: In Twitch eingeloggt <strong>F12 → Konsole</strong> öffnen und folgenden Befehl ausführen:</p>
 <div class="copy-box"><input id="token-command" readonly value="document.cookie.split('; ').find(c => c.startsWith('auth-token='))?.split('=')[1]"><button type="button" class="button-secondary" onclick="copyTokenCommand()">Befehl kopieren</button></div>
@@ -453,7 +720,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 {% endfor %}</pre>
 <h3>Cookie-Import</h3>
 <form method="post" action="{{ url_for('save_cookies') }}">
-<label>auth-token</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>auth-token</label><input name="auth_token" type="password" autocomplete="off" value="{{ config.get('auth_token', '') }}">
 <label>persistent (optional User-ID)</label><input name="persistent" value="{{ config.get('persistent', '') }}">
 <button type="submit">Cookies speichern und übernehmen</button></form>
 <form method="post" action="{{ url_for('import_cookie_file') }}">
@@ -469,13 +736,38 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="row"><div><label>Autostart-Modus</label><select name="autostart_mode"><option value="disabled" {% if config.get('autostart_mode', 'enabled') == 'disabled' %}selected{% endif %}>Aus (manuell)</option><option value="enabled" {% if config.get('autostart_mode', 'enabled') == 'enabled' %}selected{% endif %}>An</option><option value="max_tries" {% if config.get('autostart_mode', 'enabled') == 'max_tries' %}selected{% endif %}>An mit Max Login-Trys</option></select></div>
 <div><label>Max Login-Trys (nur Modus "max_tries")</label><input name="max_login_tries" type="number" min="1" value="{{ config.get('max_login_tries', 3) }}"></div></div>
 <label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
+<label>Blacklist (kommagetrennt oder zeilenweise)</label><input name="blacklist" value="{{ ','.join(config.get('blacklist', [])) }}">
 <div class="row"><div><label>Login-Modus</label><select name="login_mode"><option value="token" {% if config.get('login_mode', 'token') == 'token' %}selected{% endif %}>token (empfohlen)</option><option value="credentials" {% if config.get('login_mode', 'token') == 'credentials' %}selected{% endif %}>credentials</option><option value="none" {% if config.get('login_mode', 'token') == 'none' %}selected{% endif %}>none</option></select></div><div></div></div>
 <p class="meta"><strong>token</strong>: Start nur über vorhandene Cookies/Token (ideal für Container ohne interaktiven Login). <strong>credentials</strong>: erlaubt Username/Passwort-Login beim Start (lokal/interaktiv). <strong>none</strong>: überspringt Startup-Login komplett; nutze das nur, wenn Session/Cookies bereits vorbereitet sind.</p>
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
-<div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
+<div><label>Bet Strategy</label><select name="bet_strategy">{% for option in bet_strategies %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
 <div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
 <div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div></div></div>
+<h3>Telegram</h3>
+<div class="row"><div><label>Chat ID</label><input name="telegram_chat_id" value="{{ config.get('telegram', {}).get('chat_id', '') }}"></div><div><label>Token</label><input name="telegram_token" type="password" autocomplete="off" value="{{ config.get('telegram', {}).get('token', '') }}"></div></div>
+<div class="row"><div><label>Events (kommagetrennt)</label><input name="telegram_events" value="{{ ','.join(config.get('telegram', {}).get('events', [])) }}"></div><div><label><input type="checkbox" name="telegram_disable_notification" {% if config.get('telegram', {}).get('disable_notification') %}checked{% endif %}> Disable Notification</label></div></div>
+<h3>Discord</h3>
+<div class="row"><div><label>Webhook API</label><input name="discord_webhook_api" type="password" autocomplete="off" value="{{ config.get('discord', {}).get('webhook_api', '') }}"></div><div><label>Events (kommagetrennt)</label><input name="discord_events" value="{{ ','.join(config.get('discord', {}).get('events', [])) }}"></div></div>
+<div class="button-row">
+<button type="submit" formaction="{{ url_for('send_test_message') }}" formmethod="post" class="button-secondary">Testnachricht senden</button>
+</div>
 <button type="submit">Speichern</button></form></div>
+
+<div class="card"><h2>Analytics</h2>
+<form method="post" action="{{ url_for('save_analytics') }}">
+<div class="row"><div><label>Host</label><input name="analytics_host" value="{{ config.get('analytics', {}).get('host', '127.0.0.1') }}"></div><div><label>Port</label><input name="analytics_port" type="number" min="1" max="65535" value="{{ config.get('analytics', {}).get('port', 5000) }}"></div></div>
+<div class="row"><div><label>Refresh (Minuten)</label><input name="analytics_refresh" type="number" min="1" value="{{ config.get('analytics', {}).get('refresh', 5) }}"></div><div><label>Days Ago</label><input name="analytics_days_ago" type="number" min="1" value="{{ config.get('analytics', {}).get('days_ago', 7) }}"></div></div>
+<button type="submit">Analytics-Settings speichern</button></form>
+<div class="button-row">
+<form method="post" action="{{ url_for('analytics_start') }}"><button type="submit">Analytics starten</button></form>
+<form method="post" action="{{ url_for('analytics_stop') }}"><button type="submit" class="button-secondary">Analytics stoppen</button></form>
+</div>
+<p>Status: <strong>{{ analytics_status.state }}</strong></p>
+{% if analytics_status.last_error %}<p style="color:#ff9f9f">Letzter Fehler: {{ analytics_status.last_error }}</p>{% endif %}
+{% if analytics_action_message %}<p class="meta">Aktion: {{ analytics_action_message }}</p>{% endif %}
+<h3>Favorites / Live-Status</h3>
+<iframe src="{{ analytics_url }}/api/favorites/live-status" style="width:100%;height:220px;border:1px solid #37415a;border-radius:8px;background:#0c1019;"></iframe>
+</div>
 
 <div class="card"><h2>Status</h2>
 <p>Autostart-Modus: <strong>{{ config.get('autostart_mode', 'enabled') }}</strong></p>
@@ -535,6 +827,7 @@ setInterval(refreshApiStatus, 5000);
 @app.get("/")
 def index() -> str:
     config = load_config()
+    config["streamer_overrides"] = _normalize_streamer_overrides(config.get("streamer_overrides", {}))
     logs = read_log_tail()
     saved_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     RUNTIME_STATUS.ingest_logs(logs)
@@ -549,13 +842,34 @@ def index() -> str:
         cookie_import=LAST_COOKIE_IMPORT,
         miner_status=MINER_MANAGER.get_status(),
         miner_action_message=request.args.get("miner_message", ""),
+        analytics_url=analytics_url,
+        analytics_status=ANALYTICS_MANAGER.get_status(),
+        analytics_action_message=request.args.get("analytics_message", ""),
+        analytics_health=analytics_health,
     )
 
 
 @app.post("/save")
 def save() -> Any:
-    streamers = [s.strip() for s in request.form.get("streamers", "").split(",") if s.strip()]
+    streamers = _parse_tag_list(request.form.get("streamers", ""))
+    blacklist = _parse_tag_list(request.form.get("blacklist", ""))
     existing = load_config()
+    streamer_overrides: dict[str, Any] = {}
+    for streamer_name in streamers:
+        key = streamer_name.lower().strip()
+        streamer_overrides[key] = {
+            "make_predictions": _bool_from_form(request.form.get(f"ov_{key}_make_predictions")),
+            "follow_raid": _bool_from_form(request.form.get(f"ov_{key}_follow_raid")),
+            "claim_drops": _bool_from_form(request.form.get(f"ov_{key}_claim_drops")),
+            "watch_streak": _bool_from_form(request.form.get(f"ov_{key}_watch_streak")),
+            "chat": request.form.get(f"ov_{key}_chat", existing.get("chat_presence", "ONLINE")).strip().upper(),
+            "bet": {
+                "strategy": request.form.get(f"ov_{key}_bet_strategy", "SMART").strip().upper(),
+                "percentage": int(request.form.get(f"ov_{key}_bet_percentage", existing.get("bet", {}).get("percentage", 5))),
+                "max_points": int(request.form.get(f"ov_{key}_bet_max_points", existing.get("bet", {}).get("max_points", 50000))),
+                "minimum_points": int(request.form.get(f"ov_{key}_bet_minimum_points", existing.get("bet", {}).get("minimum_points", 0))),
+            },
+        }
     config = {
         "username": existing.get("username", ""),
         "password": existing.get("password", ""),
@@ -563,17 +877,46 @@ def save() -> Any:
         "persistent": existing.get("persistent", ""),
         "cookie_file": existing.get("cookie_file", ""),
         "streamers": streamers,
+        "blacklist": blacklist,
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
+        "priority": priority_values or existing.get("priority", DEFAULT_CONFIG["priority"]),
         "proxy": request.form.get("proxy", "").strip(),
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
         "max_login_tries": max(1, int(request.form.get("max_login_tries", 3))),
         "login_mode": _sanitize_login_mode(request.form.get("login_mode", existing.get("login_mode", "token"))),
+        "make_predictions": existing.get("make_predictions", True),
+        "follow_raid": existing.get("follow_raid", True),
+        "claim_drops": existing.get("claim_drops", True),
+        "watch_streak": existing.get("watch_streak", True),
         "bet": {
             "strategy": request.form.get("bet_strategy", "SMART"),
             "percentage": int(request.form.get("bet_percentage", 5)),
             "max_points": int(request.form.get("bet_max_points", 50000)),
             "minimum_points": int(request.form.get("bet_minimum_points", 0)),
         },
+        "telegram": {
+            "chat_id": request.form.get("telegram_chat_id", "").strip(),
+            "token": request.form.get("telegram_token", "").strip(),
+            "events": _parse_events(request.form.get("telegram_events", "")),
+            "disable_notification": request.form.get("telegram_disable_notification") == "on",
+        },
+        "discord": {
+            "webhook_api": request.form.get("discord_webhook_api", "").strip(),
+            "events": _parse_events(request.form.get("discord_events", "")),
+        },
+    }
+    save_config(config)
+    return redirect(url_for("index"))
+
+
+@app.post("/save-analytics")
+def save_analytics() -> Any:
+    config = load_config()
+    config["analytics"] = {
+        "host": request.form.get("analytics_host", "127.0.0.1").strip() or "127.0.0.1",
+        "port": max(1, min(65535, int(request.form.get("analytics_port", 5000)))),
+        "refresh": max(1, int(request.form.get("analytics_refresh", 5))),
+        "days_ago": max(1, int(request.form.get("analytics_days_ago", 7))),
     }
     save_config(config)
     return redirect(url_for("index"))
@@ -678,6 +1021,8 @@ def import_cookie_file() -> Any:
 
 @app.post("/miner/start")
 def miner_start() -> Any:
+    config = load_config()
+    build_streamers_from_config(config)
     _, message = MINER_MANAGER.start()
     return redirect(url_for("index", miner_message=message))
 
@@ -692,6 +1037,25 @@ def miner_stop() -> Any:
 def miner_restart() -> Any:
     _, message = MINER_MANAGER.restart()
     return redirect(url_for("index", miner_message=message))
+
+
+@app.post("/analytics/start")
+def analytics_start() -> Any:
+    config = load_config()
+    analytics = config.get("analytics", {})
+    success, message = ANALYTICS_MANAGER.start(
+        host=str(analytics.get("host", "127.0.0.1")),
+        port=int(analytics.get("port", 5000)),
+        refresh=int(analytics.get("refresh", 5)),
+        days_ago=int(analytics.get("days_ago", 7)),
+    )
+    return redirect(url_for("index", analytics_message=message if success else f"Fehler: {message}"))
+
+
+@app.post("/analytics/stop")
+def analytics_stop() -> Any:
+    _, message = ANALYTICS_MANAGER.stop()
+    return redirect(url_for("index", analytics_message=message))
 
 
 @app.get("/api/miner/status")
@@ -739,6 +1103,46 @@ def api_miner_restart() -> Any:
     payload = MINER_MANAGER.get_status()
     payload.update({"success": success, "message": message})
     return jsonify(payload), (200 if success else 409)
+
+
+@app.post("/send-test-message")
+def send_test_message() -> Any:
+    config = load_config()
+    payload = build_logger_settings_payload(config)
+    errors: list[str] = []
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    text = f"WebUI Testnachricht ({now})"
+
+    telegram_data = payload["telegram"]
+    if telegram_data["chat_id"] and telegram_data["token"]:
+        try:
+            Telegram(
+                chat_id=telegram_data["chat_id"],
+                token=telegram_data["token"],
+                events=telegram_data["events"],
+                disable_notification=telegram_data["disable_notification"],
+            ).send(text, "WATCH_STREAK")
+        except Exception as exc:
+            errors.append(f"Telegram Fehler: {exc.__class__.__name__}")
+    else:
+        errors.append("Telegram nicht konfiguriert (chat_id/token fehlen).")
+
+    discord_data = payload["discord"]
+    if discord_data["webhook_api"]:
+        try:
+            Discord(webhook_api=discord_data["webhook_api"], events=discord_data["events"]).send(text, "WATCH_STREAK")
+        except Exception as exc:
+            errors.append(f"Discord Fehler: {exc.__class__.__name__}")
+    else:
+        errors.append("Discord nicht konfiguriert (webhook_api fehlt).")
+
+    message = "Testnachricht gesendet." if not errors else " | ".join(errors)
+    return redirect(url_for("index", miner_message=message))
+
+
+@app.get("/api/config/logger-settings")
+def api_logger_settings() -> Any:
+    return jsonify(build_logger_settings_payload(load_config()))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("WEBUI_PORT", "8080")), debug=False)
