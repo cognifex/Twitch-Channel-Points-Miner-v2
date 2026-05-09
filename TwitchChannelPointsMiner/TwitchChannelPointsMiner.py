@@ -306,7 +306,7 @@ class TwitchChannelPointsMiner:
                     )
                     while True:
                         time.sleep(30)
-                self.end(exit_code=LOGIN_ERROR_EXIT_CODES.get(category, 0))
+                self.end(signum=None, frame=None, exit_code=LOGIN_ERROR_EXIT_CODES.get(category, 0))
                 _exit_on_fatal_login_if_enabled(category)
                 return
 
@@ -318,7 +318,7 @@ class TwitchChannelPointsMiner:
                     category,
                     extra={"emoji": ":no_entry_sign:"},
                 )
-                self.end()
+                self.end(signum=None, frame=None)
                 _exit_on_fatal_login_if_enabled(category)
                 return
 
