@@ -185,7 +185,7 @@ class TwitchLogin(object):
 
         try:
             parsed_response = response.json()
-        except ValueError:
+        except (requests.exceptions.JSONDecodeError, ValueError):
             content_type = response.headers.get("content-type", "")
             logger.warning(
                 "Twitch login endpoint returned invalid JSON "
