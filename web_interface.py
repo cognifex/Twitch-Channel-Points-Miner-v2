@@ -10,9 +10,17 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from werkzeug.serving import make_server
 
 import requests
 
+from TwitchChannelPointsMiner.classes.AnalyticsServer import (
+    favorites_live_status,
+    index as analytics_index,
+    json_all,
+    read_json,
+    streamers as analytics_streamers,
+)
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Discord import Discord
@@ -67,6 +75,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "webhook_api": "",
         "events": ["BET_WIN", "BET_LOSE"],
     },
+    "analytics": {"host": "127.0.0.1", "port": 5000, "refresh": 5, "days_ago": 7},
 }
 
 
@@ -179,6 +188,63 @@ class MinerProcessManager:
 
 
 MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
+
+
+class AnalyticsServerManager:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = "stopped"
+        self._last_error = ""
+        self._thread: threading.Thread | None = None
+        self._server: Any = None
+        self._host = "127.0.0.1"
+        self._port = 5000
+
+    def _build_app(self, refresh: int, days_ago: int) -> Flask:
+        analytics_app = Flask("analytics-webui")
+        analytics_app.add_url_rule("/", "index", analytics_index, defaults={"refresh": refresh, "days_ago": days_ago}, methods=["GET"])
+        analytics_app.add_url_rule("/streamers", "streamers", analytics_streamers, methods=["GET"])
+        analytics_app.add_url_rule("/json/<string:streamer>", "json", read_json, methods=["GET"])
+        analytics_app.add_url_rule("/json_all", "json_all", json_all, methods=["GET"])
+        analytics_app.add_url_rule("/api/favorites/live-status", "favorites_live_status", favorites_live_status, methods=["GET"])
+        return analytics_app
+
+    def get_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {"state": self._state, "host": self._host, "port": self._port, "last_error": self._last_error}
+
+    def start(self, host: str, port: int, refresh: int, days_ago: int) -> tuple[bool, str]:
+        with self._lock:
+            if self._state == "running":
+                return False, "Analytics-Server läuft bereits."
+            try:
+                analytics_app = self._build_app(refresh, days_ago)
+                self._server = make_server(host, port, analytics_app, threaded=True)
+                self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+                self._thread.start()
+                self._state = "running"
+                self._host = host
+                self._port = port
+                self._last_error = ""
+                return True, "Analytics-Server wurde gestartet."
+            except Exception as exc:
+                self._state = "error"
+                self._last_error = f"Start fehlgeschlagen: {exc.__class__.__name__}"
+                return False, self._last_error
+
+    def stop(self) -> tuple[bool, str]:
+        with self._lock:
+            if self._state != "running" or self._server is None:
+                self._state = "stopped"
+                return False, "Analytics-Server läuft nicht."
+            self._server.shutdown()
+            self._server = None
+            self._thread = None
+            self._state = "stopped"
+            return True, "Analytics-Server wurde gestoppt."
+
+
+ANALYTICS_MANAGER = AnalyticsServerManager()
 
 VALID_LOGIN_MODES = {"none", "token", "credentials"}
 PRIORITY_UI_OPTIONS = ["STREAK", "DROPS", "ORDER", "POINTS_ASCENDING", "POINTS_DESCEDING", "SUBSCRIBED"]
@@ -593,6 +659,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 </style></head><body><div class="container">
 <h1>Twitch Channel Points Miner – Webinterface</h1>
 <p class="meta">Config-Datei: {{ config_path }} | Log-Datei: {{ log_path }}</p>
+<p class="meta">Analytics: <a href="{{ analytics_url }}" target="_blank" rel="noopener">{{ analytics_url }}</a> | Health: <strong style="color:{% if analytics_health.reachable %}#7dff9a{% else %}#ff9f9f{% endif %}">{% if analytics_health.reachable %}reachable{% else %}not reachable{% endif %}</strong></p>
 
 <div class="card"><h2>Login</h2>
 <form method="post" action="{{ url_for('save_login') }}">
@@ -646,6 +713,22 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <button type="submit" formaction="{{ url_for('send_test_message') }}" formmethod="post" class="button-secondary">Testnachricht senden</button>
 </div>
 <button type="submit">Speichern</button></form></div>
+
+<div class="card"><h2>Analytics</h2>
+<form method="post" action="{{ url_for('save_analytics') }}">
+<div class="row"><div><label>Host</label><input name="analytics_host" value="{{ config.get('analytics', {}).get('host', '127.0.0.1') }}"></div><div><label>Port</label><input name="analytics_port" type="number" min="1" max="65535" value="{{ config.get('analytics', {}).get('port', 5000) }}"></div></div>
+<div class="row"><div><label>Refresh (Minuten)</label><input name="analytics_refresh" type="number" min="1" value="{{ config.get('analytics', {}).get('refresh', 5) }}"></div><div><label>Days Ago</label><input name="analytics_days_ago" type="number" min="1" value="{{ config.get('analytics', {}).get('days_ago', 7) }}"></div></div>
+<button type="submit">Analytics-Settings speichern</button></form>
+<div class="button-row">
+<form method="post" action="{{ url_for('analytics_start') }}"><button type="submit">Analytics starten</button></form>
+<form method="post" action="{{ url_for('analytics_stop') }}"><button type="submit" class="button-secondary">Analytics stoppen</button></form>
+</div>
+<p>Status: <strong>{{ analytics_status.state }}</strong></p>
+{% if analytics_status.last_error %}<p style="color:#ff9f9f">Letzter Fehler: {{ analytics_status.last_error }}</p>{% endif %}
+{% if analytics_action_message %}<p class="meta">Aktion: {{ analytics_action_message }}</p>{% endif %}
+<h3>Favorites / Live-Status</h3>
+<iframe src="{{ analytics_url }}/api/favorites/live-status" style="width:100%;height:220px;border:1px solid #37415a;border-radius:8px;background:#0c1019;"></iframe>
+</div>
 
 <div class="card"><h2>Status</h2>
 <p>Autostart-Modus: <strong>{{ config.get('autostart_mode', 'enabled') }}</strong></p>
@@ -701,6 +784,16 @@ def index() -> str:
     logs = read_log_tail()
     saved_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     runtime_status = extract_runtime_status(logs)
+    analytics_cfg = config.get("analytics", {})
+    analytics_host = analytics_cfg.get("host", "127.0.0.1")
+    analytics_port = int(analytics_cfg.get("port", 5000))
+    analytics_url = f"http://{analytics_host}:{analytics_port}"
+    analytics_health = {"reachable": False}
+    try:
+        check = requests.get(f"{analytics_url}/", timeout=1.5)
+        analytics_health["reachable"] = check.ok
+    except requests.RequestException:
+        analytics_health["reachable"] = False
     return render_template_string(
         TEMPLATE,
         config=config,
@@ -713,10 +806,10 @@ def index() -> str:
         cookie_import=LAST_COOKIE_IMPORT,
         miner_status=MINER_MANAGER.get_status(),
         miner_action_message=request.args.get("miner_message", ""),
-        bet_strategies=BET_STRATEGIES,
-        delay_modes=DELAY_MODES,
-        filter_by_options=FILTER_BY_OPTIONS,
-        filter_where_options=FILTER_WHERE_OPTIONS,
+        analytics_url=analytics_url,
+        analytics_status=ANALYTICS_MANAGER.get_status(),
+        analytics_action_message=request.args.get("analytics_message", ""),
+        analytics_health=analytics_health,
     )
 
 
@@ -775,6 +868,19 @@ def save() -> Any:
             "webhook_api": request.form.get("discord_webhook_api", "").strip(),
             "events": _parse_events(request.form.get("discord_events", "")),
         },
+    }
+    save_config(config)
+    return redirect(url_for("index"))
+
+
+@app.post("/save-analytics")
+def save_analytics() -> Any:
+    config = load_config()
+    config["analytics"] = {
+        "host": request.form.get("analytics_host", "127.0.0.1").strip() or "127.0.0.1",
+        "port": max(1, min(65535, int(request.form.get("analytics_port", 5000)))),
+        "refresh": max(1, int(request.form.get("analytics_refresh", 5))),
+        "days_ago": max(1, int(request.form.get("analytics_days_ago", 7))),
     }
     save_config(config)
     return redirect(url_for("index"))
@@ -895,6 +1001,25 @@ def miner_stop() -> Any:
 def miner_restart() -> Any:
     _, message = MINER_MANAGER.restart()
     return redirect(url_for("index", miner_message=message))
+
+
+@app.post("/analytics/start")
+def analytics_start() -> Any:
+    config = load_config()
+    analytics = config.get("analytics", {})
+    success, message = ANALYTICS_MANAGER.start(
+        host=str(analytics.get("host", "127.0.0.1")),
+        port=int(analytics.get("port", 5000)),
+        refresh=int(analytics.get("refresh", 5)),
+        days_ago=int(analytics.get("days_ago", 7)),
+    )
+    return redirect(url_for("index", analytics_message=message if success else f"Fehler: {message}"))
+
+
+@app.post("/analytics/stop")
+def analytics_stop() -> Any:
+    _, message = ANALYTICS_MANAGER.stop()
+    return redirect(url_for("index", analytics_message=message))
 
 
 @app.get("/api/miner/status")
