@@ -35,5 +35,3 @@ services:
       - ./:/data
     ports:
       - "${WEBUI_PORT:-8080}:8080"
-    depends_on:
-      - miner

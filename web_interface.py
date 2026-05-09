@@ -34,6 +34,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "watch_streak": True,
     "chat_presence": "ONLINE",
     "proxy": "",
+    "autostart_mode": "enabled",
+    "max_login_tries": 3,
     "bet": {
         "strategy": "SMART",
         "percentage": 5,
@@ -320,6 +322,8 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="card"><h2>Konfiguration</h2>
 <form method="post" action="{{ url_for('save') }}">
 <label>Proxy URL (optional)</label><input name="proxy" value="{{ config.get('proxy', '') }}">
+<div class="row"><div><label>Autostart-Modus</label><select name="autostart_mode"><option value="disabled" {% if config.get('autostart_mode', 'enabled') == 'disabled' %}selected{% endif %}>Aus (manuell)</option><option value="enabled" {% if config.get('autostart_mode', 'enabled') == 'enabled' %}selected{% endif %}>An</option><option value="max_tries" {% if config.get('autostart_mode', 'enabled') == 'max_tries' %}selected{% endif %}>An mit Max Login-Trys</option></select></div>
+<div><label>Max Login-Trys (nur Modus "max_tries")</label><input name="max_login_tries" type="number" min="1" value="{{ config.get('max_login_tries', 3) }}"></div></div>
 <label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
 <div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
@@ -328,6 +332,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <button type="submit">Speichern</button></form></div>
 
 <div class="card"><h2>Status</h2>
+<p>Autostart-Modus: <strong>{{ config.get('autostart_mode', 'enabled') }}</strong></p>
 <p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
 <div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
@@ -376,6 +381,8 @@ def save() -> Any:
         "streamers": streamers,
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
         "proxy": request.form.get("proxy", "").strip(),
+        "autostart_mode": request.form.get("autostart_mode", "enabled"),
+        "max_login_tries": max(1, int(request.form.get("max_login_tries", 3))),
         "bet": {
             "strategy": request.form.get("bet_strategy", "SMART"),
             "percentage": int(request.form.get("bet_percentage", 5)),
