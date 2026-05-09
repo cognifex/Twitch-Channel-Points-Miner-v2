@@ -82,9 +82,15 @@ class Twitch(object):
         if env_auth_token:
             logger.info("Using TWITCH_AUTH_TOKEN from environment as startup fallback.")
             self.twitch_login.set_token(env_auth_token)
-            if self.twitch_login.check_login():
-                logger.info("Environment token login successful.")
-                return
+            try:
+                if self.twitch_login.check_login():
+                    logger.info("Environment token login successful.")
+                    return
+            except Exception as exc:
+                raise BadCredentialsException(
+                    "TWITCH_AUTH_TOKEN was provided but could not be validated by Twitch. "
+                    "Please refresh the token/cookies."
+                ) from exc
             raise BadCredentialsException(
                 "TWITCH_AUTH_TOKEN was provided but Twitch rejected it."
             )
