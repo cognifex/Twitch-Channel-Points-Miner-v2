@@ -298,6 +298,33 @@ twitch_miner = TwitchChannelPointsMiner("your-twitch-username")
 twitch_miner.mine(followers=True, blacklist=["user1", "user2"])  # Blacklist example
 ```
 
+
+### Login modes (startup behavior)
+
+Use `login_mode` to choose how startup authentication behaves:
+
+| Mode | Behavior | Recommended use |
+| ---- | -------- | --------------- |
+| `none` | Starts without attempting login. | Diagnostics only (no authenticated actions). |
+| `token` | Requires `cookies/<username>.pkl` and logs in via stored cookie/token. | **Default mode** for stable and non-interactive runs. |
+| `credentials` | Attempts interactive/credential-based login when needed. | Optional local fallback, not the default. |
+
+### Create and provide `cookies/<username>.pkl`
+
+1. Ensure your `run.py` uses the matching Twitch username and `login_mode="token"`.
+2. Create a local `cookies/` directory next to `run.py`.
+3. Place your exported cookie file in that directory and rename it to `<username>.pkl` (same value as `username`).
+4. Start the miner; it will load `cookies/<username>.pkl` on startup.
+
+Expected structure:
+
+```
+.
++-- run.py
++-- cookies
+|   +-- <username>.pkl
+```
+
 ### By cloning the repository
 1. Clone this repository `git clone https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2`
 2. Install all the requirements `pip install -r requirements.txt` . If you have problems with requirements, make sure to have at least Python3.6. You could also try to create a _virtualenv_ and then install all the requirements
@@ -327,7 +354,7 @@ These folders are mounted :
 - cookies : to provide login information
 - logs : to keep logs outside of container
 
-Default login mode in `run.py` should be `login_mode="token"` so containers run cookie/token-only by default.
+Default login mode in `run.py` is `login_mode="token"` (cookie/token workflow).
 
 **Example using docker-compose:**
 
@@ -363,7 +390,7 @@ docker run \
 
 `$(pwd)` Could not work on Windows (cmd), please use the absolute path instead, like: `/path/of/your/cookies:/usr/src/app/cookies`.
 If you don't mount the volume for the analytics (or cookies or logs) folder, the folder will be automatically created on the Docker container, and you will lose all the data when it is stopped.
-If you don't have a cookie or It's your first time running the script, you will need to login to Twitch and start the container with `-it` args. If you need to run multiple containers you can bind different ports (only if you need also the analytics) and mount dirrent run.py file, like
+Containers are usually non-interactive, so avoid credential prompts at startup. Use the token workflow instead: prepare `cookies/<username>.pkl`, mount `./cookies:/usr/src/app/cookies`, and keep `login_mode="token"`. If you need to run multiple containers you can bind different ports (only if you need also the analytics) and mount dirrent run.py file, like
 ```sh
 docker run --name user1-v $(pwd)/user1.py:/usr/src/app/run.py:ro -p 5001:5000 tkdalex/twitch-channel-points-miner-v2
 ```
