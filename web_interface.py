@@ -31,6 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "persistent": "",
     "cookie_file": "",
     "streamers": [],
+    "followers": False,
+    "followers_order": "ASC",
     "make_predictions": True,
     "follow_raid": True,
     "claim_drops": True,
@@ -109,6 +111,8 @@ class MinerProcessManager:
                 login_mode = _sanitize_login_mode(current_config.get("login_mode"))
                 process_env = os.environ.copy()
                 process_env["TWITCH_LOGIN_MODE"] = login_mode
+                process_env["TWITCH_FOLLOWERS"] = "1" if bool(current_config.get("followers", False)) else "0"
+                process_env["TWITCH_FOLLOWERS_ORDER"] = str(current_config.get("followers_order", "ASC")).strip().upper()
 
                 self._process = subprocess.Popen(  # noqa: S603
                     self.command,
@@ -430,6 +434,9 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="row"><div><label>Autostart-Modus</label><select name="autostart_mode"><option value="disabled" {% if config.get('autostart_mode', 'enabled') == 'disabled' %}selected{% endif %}>Aus (manuell)</option><option value="enabled" {% if config.get('autostart_mode', 'enabled') == 'enabled' %}selected{% endif %}>An</option><option value="max_tries" {% if config.get('autostart_mode', 'enabled') == 'max_tries' %}selected{% endif %}>An mit Max Login-Trys</option></select></div>
 <div><label>Max Login-Trys (nur Modus "max_tries")</label><input name="max_login_tries" type="number" min="1" value="{{ config.get('max_login_tries', 3) }}"></div></div>
 <label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
+<div class="row"><div><label>Follower-Liste zusätzlich verwenden</label><select name="followers"><option value="false" {% if not config.get('followers', False) %}selected{% endif %}>Nein</option><option value="true" {% if config.get('followers', False) %}selected{% endif %}>Ja</option></select></div>
+<div><label>Follower-Reihenfolge</label><select name="followers_order"><option value="ASC" {% if config.get('followers_order', 'ASC') == 'ASC' %}selected{% endif %}>ASC (älteste Follows zuerst)</option><option value="DESC" {% if config.get('followers_order', 'ASC') == 'DESC' %}selected{% endif %}>DESC (neueste Follows zuerst)</option></select></div></div>
+<p class="meta"><strong>Kombination mit Streamer-Liste:</strong> Wenn <strong>Follower-Liste = Ja</strong>, werden beim Start zuerst die manuell gepflegten Streamer geladen und danach zusätzliche Kanäle aus deiner Follower-Liste ergänzt (ohne Duplikate).</p>
 <div class="row"><div><label>Login-Modus</label><select name="login_mode"><option value="token" {% if config.get('login_mode', 'token') == 'token' %}selected{% endif %}>token (empfohlen)</option><option value="credentials" {% if config.get('login_mode', 'token') == 'credentials' %}selected{% endif %}>credentials</option><option value="none" {% if config.get('login_mode', 'token') == 'none' %}selected{% endif %}>none</option></select></div><div></div></div>
 <p class="meta"><strong>token</strong>: Start nur über vorhandene Cookies/Token (ideal für Container ohne interaktiven Login). <strong>credentials</strong>: erlaubt Username/Passwort-Login beim Start (lokal/interaktiv). <strong>none</strong>: überspringt Startup-Login komplett; nutze das nur, wenn Session/Cookies bereits vorbereitet sind.</p>
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
@@ -497,6 +504,8 @@ def save() -> Any:
         "persistent": existing.get("persistent", ""),
         "cookie_file": existing.get("cookie_file", ""),
         "streamers": streamers,
+        "followers": request.form.get("followers", "false").strip().lower() == "true",
+        "followers_order": "DESC" if request.form.get("followers_order", "ASC").strip().upper() == "DESC" else "ASC",
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
         "proxy": request.form.get("proxy", "").strip(),
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
