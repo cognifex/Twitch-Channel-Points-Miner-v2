@@ -15,6 +15,7 @@ import requests
 
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
+from TwitchChannelPointsMiner.classes.entities.Bet import Condition, DelayMode, OutcomeKeys, Strategy
 
 app = Flask(__name__)
 
@@ -43,8 +44,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bet": {
         "strategy": "SMART",
         "percentage": 5,
+        "percentage_gap": 20,
         "max_points": 50000,
         "minimum_points": 0,
+        "stealth_mode": False,
+        "delay_mode": "FROM_END",
+        "delay": 6,
     },
 }
 
@@ -158,6 +163,122 @@ class MinerProcessManager:
 MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
 
 VALID_LOGIN_MODES = {"none", "token", "credentials"}
+
+BET_STRATEGIES = [strategy.name for strategy in Strategy]
+DELAY_MODES = [mode.name for mode in DelayMode]
+FILTER_BY_OPTIONS = [
+    OutcomeKeys.PERCENTAGE_USERS,
+    OutcomeKeys.ODDS_PERCENTAGE,
+    OutcomeKeys.ODDS,
+    OutcomeKeys.TOP_POINTS,
+    OutcomeKeys.TOTAL_USERS,
+    OutcomeKeys.TOTAL_POINTS,
+    OutcomeKeys.DECISION_USERS,
+    OutcomeKeys.DECISION_POINTS,
+]
+FILTER_WHERE_OPTIONS = [condition.name for condition in Condition]
+
+
+def _sanitize_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _normalize_bet_config(bet: dict[str, Any] | None) -> dict[str, Any]:
+    bet = dict(bet or {})
+    strategy = str(bet.get("strategy", "SMART")).strip().upper()
+    if strategy not in BET_STRATEGIES:
+        strategy = "SMART"
+    delay_mode = str(bet.get("delay_mode", "FROM_END")).strip().upper()
+    if delay_mode not in DELAY_MODES:
+        delay_mode = "FROM_END"
+
+    filter_condition = bet.get("filter_condition")
+    normalized_filter = None
+    if isinstance(filter_condition, dict):
+        by = str(filter_condition.get("by", "")).strip()
+        where = str(filter_condition.get("where", "")).strip().upper()
+        value = filter_condition.get("value")
+        if by in FILTER_BY_OPTIONS and where in FILTER_WHERE_OPTIONS and str(value).strip() != "":
+            normalized_filter = {"by": by, "where": where, "value": float(value)}
+
+    normalized = {
+        "strategy": strategy,
+        "percentage": int(bet.get("percentage", 5)),
+        "percentage_gap": int(bet.get("percentage_gap", 20)),
+        "max_points": int(bet.get("max_points", 50000)),
+        "minimum_points": int(bet.get("minimum_points", 0)),
+        "stealth_mode": bool(bet.get("stealth_mode", False)),
+        "delay_mode": delay_mode,
+        "delay": float(bet.get("delay", 6)),
+    }
+    if normalized_filter is not None:
+        normalized["filter_condition"] = normalized_filter
+    return normalized
+
+
+def _parse_and_validate_bet_settings(form: dict[str, str], existing_bet: dict[str, Any]) -> dict[str, Any]:
+    strategy = str(form.get("bet_strategy", existing_bet.get("strategy", "SMART"))).strip().upper()
+    if strategy not in BET_STRATEGIES:
+        raise ValueError("Ungültige Bet-Strategie.")
+
+    percentage = int(form.get("bet_percentage", existing_bet.get("percentage", 5)))
+    percentage_gap = int(form.get("bet_percentage_gap", existing_bet.get("percentage_gap", 20)))
+    max_points = int(form.get("bet_max_points", existing_bet.get("max_points", 50000)))
+    minimum_points = int(form.get("bet_minimum_points", existing_bet.get("minimum_points", 0)))
+    stealth_mode = _sanitize_bool(form.get("bet_stealth_mode"), bool(existing_bet.get("stealth_mode", False)))
+    delay_mode = str(form.get("bet_delay_mode", existing_bet.get("delay_mode", "FROM_END"))).strip().upper()
+    delay = float(form.get("bet_delay", existing_bet.get("delay", 6)))
+
+    if delay_mode not in DELAY_MODES:
+        raise ValueError("Ungültiger Delay-Modus.")
+    if not 1 <= percentage <= 100:
+        raise ValueError("Bet Percentage muss zwischen 1 und 100 liegen.")
+    if percentage_gap < 0:
+        raise ValueError("Percentage Gap muss >= 0 sein.")
+    if max_points < 1:
+        raise ValueError("Max Points muss >= 1 sein.")
+    if minimum_points < 0:
+        raise ValueError("Minimum Points muss >= 0 sein.")
+    if delay < 0:
+        raise ValueError("Delay muss >= 0 sein.")
+
+    if strategy == "SMART" and percentage_gap <= 0:
+        raise ValueError("SMART benötigt percentage_gap > 0.")
+    if strategy == "PERCENTAGE" and not 1 <= percentage <= 100:
+        raise ValueError("PERCENTAGE benötigt percentage zwischen 1 und 100.")
+
+    filter_by = str(form.get("filter_by", "")).strip()
+    filter_where = str(form.get("filter_where", "")).strip().upper()
+    filter_value_raw = str(form.get("filter_value", "")).strip()
+
+    bet: dict[str, Any] = {
+        "strategy": strategy,
+        "percentage": percentage,
+        "percentage_gap": percentage_gap,
+        "max_points": max_points,
+        "minimum_points": minimum_points,
+        "stealth_mode": stealth_mode,
+        "delay_mode": delay_mode,
+        "delay": delay,
+    }
+
+    has_filter = bool(filter_by or filter_where or filter_value_raw)
+    if has_filter:
+        if filter_by not in FILTER_BY_OPTIONS:
+            raise ValueError("Ungültiges Filterfeld (by).")
+        if filter_where not in FILTER_WHERE_OPTIONS:
+            raise ValueError("Ungültiger Filteroperator (where).")
+        if filter_value_raw == "":
+            raise ValueError("Filterwert (value) fehlt.")
+        bet["filter_condition"] = {
+            "by": filter_by,
+            "where": filter_where,
+            "value": float(filter_value_raw),
+        }
+
+    return bet
 
 
 def _sanitize_login_mode(value: str | None) -> str:
@@ -433,9 +554,14 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="row"><div><label>Login-Modus</label><select name="login_mode"><option value="token" {% if config.get('login_mode', 'token') == 'token' %}selected{% endif %}>token (empfohlen)</option><option value="credentials" {% if config.get('login_mode', 'token') == 'credentials' %}selected{% endif %}>credentials</option><option value="none" {% if config.get('login_mode', 'token') == 'none' %}selected{% endif %}>none</option></select></div><div></div></div>
 <p class="meta"><strong>token</strong>: Start nur über vorhandene Cookies/Token (ideal für Container ohne interaktiven Login). <strong>credentials</strong>: erlaubt Username/Passwort-Login beim Start (lokal/interaktiv). <strong>none</strong>: überspringt Startup-Login komplett; nutze das nur, wenn Session/Cookies bereits vorbereitet sind.</p>
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
-<div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
+<div><label>Bet Strategy</label><select name="bet_strategy">{% for option in bet_strategies %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
 <div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
-<div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div></div></div>
+<div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div><label>Percentage Gap</label><input name="bet_percentage_gap" type="number" min="0" value="{{ config.get('bet', {}).get('percentage_gap', 20) }}"></div></div>
+<div class="row"><div><label>Stealth Mode</label><select name="bet_stealth_mode"><option value="false" {% if not config.get('bet', {}).get('stealth_mode', False) %}selected{% endif %}>false</option><option value="true" {% if config.get('bet', {}).get('stealth_mode', False) %}selected{% endif %}>true</option></select></div><div><label>Delay Mode</label><select name="bet_delay_mode">{% for mode in delay_modes %}<option value="{{ mode }}" {% if config.get('bet', {}).get('delay_mode', 'FROM_END') == mode %}selected{% endif %}>{{ mode }}</option>{% endfor %}</select></div></div>
+<div class="row"><div><label>Delay</label><input name="bet_delay" type="number" min="0" step="0.1" value="{{ config.get('bet', {}).get('delay', 6) }}"></div><div></div></div>
+<h3>Filter Condition</h3>
+<div class="row"><div><label>by</label><select name="filter_by"><option value="">(deaktiviert)</option>{% for by in filter_by_options %}<option value="{{ by }}" {% if config.get('bet', {}).get('filter_condition', {}).get('by') == by %}selected{% endif %}>{{ by }}</option>{% endfor %}</select></div><div><label>where</label><select name="filter_where"><option value="">(deaktiviert)</option>{% for where in filter_where_options %}<option value="{{ where }}" {% if config.get('bet', {}).get('filter_condition', {}).get('where') == where %}selected{% endif %}>{{ where }}</option>{% endfor %}</select></div></div>
+<div class="row"><div><label>value</label><input name="filter_value" type="number" step="any" value="{{ config.get('bet', {}).get('filter_condition', {}).get('value', '') }}"></div><div></div></div>
 <button type="submit">Speichern</button></form></div>
 
 <div class="card"><h2>Status</h2>
@@ -483,6 +609,10 @@ def index() -> str:
         cookie_import=LAST_COOKIE_IMPORT,
         miner_status=MINER_MANAGER.get_status(),
         miner_action_message=request.args.get("miner_message", ""),
+        bet_strategies=BET_STRATEGIES,
+        delay_modes=DELAY_MODES,
+        filter_by_options=FILTER_BY_OPTIONS,
+        filter_where_options=FILTER_WHERE_OPTIONS,
     )
 
 
@@ -490,6 +620,11 @@ def index() -> str:
 def save() -> Any:
     streamers = [s.strip() for s in request.form.get("streamers", "").split(",") if s.strip()]
     existing = load_config()
+    try:
+        bet_config = _parse_and_validate_bet_settings(request.form, _normalize_bet_config(existing.get("bet", {})))
+    except (TypeError, ValueError) as exc:
+        return redirect(url_for("index", miner_message=f"Ungültige Bet-Konfiguration: {exc}"))
+
     config = {
         "username": existing.get("username", ""),
         "password": existing.get("password", ""),
@@ -502,12 +637,7 @@ def save() -> Any:
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
         "max_login_tries": max(1, int(request.form.get("max_login_tries", 3))),
         "login_mode": _sanitize_login_mode(request.form.get("login_mode", existing.get("login_mode", "token"))),
-        "bet": {
-            "strategy": request.form.get("bet_strategy", "SMART"),
-            "percentage": int(request.form.get("bet_percentage", 5)),
-            "max_points": int(request.form.get("bet_max_points", 50000)),
-            "minimum_points": int(request.form.get("bet_minimum_points", 0)),
-        },
+        "bet": bet_config,
     }
     save_config(config)
     return redirect(url_for("index"))
