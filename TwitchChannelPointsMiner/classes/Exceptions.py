@@ -12,3 +12,7 @@ class WrongCookiesException(Exception):
 
 class BadCredentialsException(Exception):
     pass
+
+
+class LoginResponseParseException(Exception):
+    pass

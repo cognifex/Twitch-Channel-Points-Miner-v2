@@ -20,6 +20,7 @@ from TwitchChannelPointsMiner.classes.entities.Streamer import (
 )
 from TwitchChannelPointsMiner.classes.Exceptions import (
     BadCredentialsException,
+    LoginResponseParseException,
     StreamerDoesNotExistException,
 )
 from TwitchChannelPointsMiner.classes.Settings import FollowersOrder, Priority, Settings
@@ -200,7 +201,7 @@ class TwitchChannelPointsMiner:
 
             try:
                 self.twitch.login()
-            except BadCredentialsException as exc:
+            except (BadCredentialsException, LoginResponseParseException) as exc:
                 logger.error(
                     "Login failed: %s",
                     exc,
