@@ -54,7 +54,15 @@ logger = logging.getLogger(__name__)
 
 def _resolve_login_mode(login_mode, auto_login, prefer_token_login):
     if login_mode is not None:
-        return login_mode
+        normalized_login_mode = str(login_mode).strip().lower()
+        if normalized_login_mode in {"none", "token", "credentials"}:
+            return normalized_login_mode
+
+        raise ValueError(
+            "Unsupported login_mode '{}'. Use 'none', 'token', or 'credentials'.".format(
+                login_mode
+            )
+        )
 
     if auto_login is False:
         return "none"
