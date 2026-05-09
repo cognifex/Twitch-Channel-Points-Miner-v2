@@ -51,6 +51,19 @@ logging.getLogger("irc.client").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 
+def _resolve_login_mode(login_mode, auto_login, prefer_token_login):
+    if login_mode is not None:
+        return login_mode
+
+    if auto_login is False:
+        return "none"
+
+    if prefer_token_login is True:
+        return "token"
+
+    return "credentials"
+
+
 class TwitchChannelPointsMiner:
     __slots__ = [
         "username",
@@ -68,8 +81,7 @@ class TwitchChannelPointsMiner:
         "original_streamers",
         "logs_file",
         "queue_listener",
-        "auto_login",
-        "prefer_token_login",
+        "login_mode",
     ]
 
     def __init__(
@@ -77,6 +89,7 @@ class TwitchChannelPointsMiner:
         username: str,
         password: str = None,
         claim_drops_startup: bool = False,
+        login_mode: str = None,
         auto_login: bool = True,
         prefer_token_login: bool = True,
         allow_credential_login: bool = False,
@@ -101,14 +114,17 @@ class TwitchChannelPointsMiner:
         Settings.streamer_settings = streamer_settings
 
         user_agent = get_user_agent("FIREFOX")
-        self.auto_login = auto_login
-        self.prefer_token_login = prefer_token_login
+        self.login_mode = _resolve_login_mode(login_mode, auto_login, prefer_token_login)
+        if login_mode is None and (auto_login is not True or prefer_token_login is not True):
+            logger.warning(
+                "Parameters 'auto_login' and 'prefer_token_login' are deprecated. "
+                "Use 'login_mode' ('none'|'token'|'credentials') instead."
+            )
         self.twitch = Twitch(
             self.username,
             user_agent,
             password,
-            auto_login=self.auto_login,
-            prefer_token_login=self.prefer_token_login,
+            login_mode=self.login_mode,
             allow_credential_login=allow_credential_login,
         )
 
@@ -196,7 +212,7 @@ class TwitchChannelPointsMiner:
             auth_token = self.twitch.twitch_login.get_auth_token()
             if not auth_token:
                 logger.error(
-                    "No Twitch auth token available. Start aborted because auto_login is disabled or login did not complete.",
+                    "No Twitch auth token available. Start aborted because login did not complete.",
                     extra={"emoji": ":no_entry_sign:"},
                 )
                 self.end()

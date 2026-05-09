@@ -15,8 +15,7 @@ twitch_miner = TwitchChannelPointsMiner(
     username="your-twitch-username",
     password="write-your-secure-psw",           # If no password will be provided, the script will ask interactively
     claim_drops_startup=False,                  # If you want to auto claim all drops from Twitch inventory on the startup
-    auto_login=True,                            # Disable to skip startup login completely
-    prefer_token_login=False,                   # Enable to force token/cookies login and skip credential login fallback
+    login_mode="token",                      # 'none' = no startup login, 'token' = cookies only (default), 'credentials' = allow credential login
     priority=[                                  # Custom priority in this case for example:
         Priority.STREAK,                        # - We want first of all to catch all watch streak from all streamers
         Priority.DROPS,                         # - When we don't have anymore watch streak to catch, wait until all drops are collected over the streamers
