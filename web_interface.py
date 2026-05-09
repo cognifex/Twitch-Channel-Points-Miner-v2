@@ -14,6 +14,7 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 import requests
 
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
+from TwitchChannelPointsMiner.classes.Settings import Priority
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
@@ -34,11 +35,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "persistent": "",
     "cookie_file": "",
     "streamers": [],
+    "blacklist": [],
     "make_predictions": True,
     "follow_raid": True,
     "claim_drops": True,
     "watch_streak": True,
     "chat_presence": "ONLINE",
+    "priority": ["STREAK", "DROPS", "ORDER"],
     "proxy": "",
     "autostart_mode": "enabled",
     "max_login_tries": 3,
@@ -46,8 +49,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bet": {
         "strategy": "SMART",
         "percentage": 5,
+        "percentage_gap": 20,
         "max_points": 50000,
         "minimum_points": 0,
+        "stealth_mode": False,
+        "delay_mode": "FROM_END",
+        "delay": 6,
     },
     "streamer_overrides": {},
 }
@@ -111,8 +118,10 @@ class MinerProcessManager:
             try:
                 current_config = load_config()
                 login_mode = _sanitize_login_mode(current_config.get("login_mode"))
+                mapped_priority = _map_priority_values(current_config.get("priority", DEFAULT_CONFIG["priority"]))
                 process_env = os.environ.copy()
                 process_env["TWITCH_LOGIN_MODE"] = login_mode
+                process_env["TWITCH_PRIORITY"] = json.dumps([item.name for item in mapped_priority])
 
                 self._process = subprocess.Popen(  # noqa: S603
                     self.command,
@@ -162,11 +171,153 @@ class MinerProcessManager:
 MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
 
 VALID_LOGIN_MODES = {"none", "token", "credentials"}
+PRIORITY_UI_OPTIONS = ["STREAK", "DROPS", "ORDER", "POINTS_ASCENDING", "POINTS_DESCEDING", "SUBSCRIBED"]
+
+BET_STRATEGIES = [strategy.name for strategy in Strategy]
+DELAY_MODES = [mode.name for mode in DelayMode]
+FILTER_BY_OPTIONS = [
+    OutcomeKeys.PERCENTAGE_USERS,
+    OutcomeKeys.ODDS_PERCENTAGE,
+    OutcomeKeys.ODDS,
+    OutcomeKeys.TOP_POINTS,
+    OutcomeKeys.TOTAL_USERS,
+    OutcomeKeys.TOTAL_POINTS,
+    OutcomeKeys.DECISION_USERS,
+    OutcomeKeys.DECISION_POINTS,
+]
+FILTER_WHERE_OPTIONS = [condition.name for condition in Condition]
+
+
+def _sanitize_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _normalize_bet_config(bet: dict[str, Any] | None) -> dict[str, Any]:
+    bet = dict(bet or {})
+    strategy = str(bet.get("strategy", "SMART")).strip().upper()
+    if strategy not in BET_STRATEGIES:
+        strategy = "SMART"
+    delay_mode = str(bet.get("delay_mode", "FROM_END")).strip().upper()
+    if delay_mode not in DELAY_MODES:
+        delay_mode = "FROM_END"
+
+    filter_condition = bet.get("filter_condition")
+    normalized_filter = None
+    if isinstance(filter_condition, dict):
+        by = str(filter_condition.get("by", "")).strip()
+        where = str(filter_condition.get("where", "")).strip().upper()
+        value = filter_condition.get("value")
+        if by in FILTER_BY_OPTIONS and where in FILTER_WHERE_OPTIONS and str(value).strip() != "":
+            normalized_filter = {"by": by, "where": where, "value": float(value)}
+
+    normalized = {
+        "strategy": strategy,
+        "percentage": int(bet.get("percentage", 5)),
+        "percentage_gap": int(bet.get("percentage_gap", 20)),
+        "max_points": int(bet.get("max_points", 50000)),
+        "minimum_points": int(bet.get("minimum_points", 0)),
+        "stealth_mode": bool(bet.get("stealth_mode", False)),
+        "delay_mode": delay_mode,
+        "delay": float(bet.get("delay", 6)),
+    }
+    if normalized_filter is not None:
+        normalized["filter_condition"] = normalized_filter
+    return normalized
+
+
+def _parse_and_validate_bet_settings(form: dict[str, str], existing_bet: dict[str, Any]) -> dict[str, Any]:
+    strategy = str(form.get("bet_strategy", existing_bet.get("strategy", "SMART"))).strip().upper()
+    if strategy not in BET_STRATEGIES:
+        raise ValueError("Ungültige Bet-Strategie.")
+
+    percentage = int(form.get("bet_percentage", existing_bet.get("percentage", 5)))
+    percentage_gap = int(form.get("bet_percentage_gap", existing_bet.get("percentage_gap", 20)))
+    max_points = int(form.get("bet_max_points", existing_bet.get("max_points", 50000)))
+    minimum_points = int(form.get("bet_minimum_points", existing_bet.get("minimum_points", 0)))
+    stealth_mode = _sanitize_bool(form.get("bet_stealth_mode"), bool(existing_bet.get("stealth_mode", False)))
+    delay_mode = str(form.get("bet_delay_mode", existing_bet.get("delay_mode", "FROM_END"))).strip().upper()
+    delay = float(form.get("bet_delay", existing_bet.get("delay", 6)))
+
+    if delay_mode not in DELAY_MODES:
+        raise ValueError("Ungültiger Delay-Modus.")
+    if not 1 <= percentage <= 100:
+        raise ValueError("Bet Percentage muss zwischen 1 und 100 liegen.")
+    if percentage_gap < 0:
+        raise ValueError("Percentage Gap muss >= 0 sein.")
+    if max_points < 1:
+        raise ValueError("Max Points muss >= 1 sein.")
+    if minimum_points < 0:
+        raise ValueError("Minimum Points muss >= 0 sein.")
+    if delay < 0:
+        raise ValueError("Delay muss >= 0 sein.")
+
+    if strategy == "SMART" and percentage_gap <= 0:
+        raise ValueError("SMART benötigt percentage_gap > 0.")
+    if strategy == "PERCENTAGE" and not 1 <= percentage <= 100:
+        raise ValueError("PERCENTAGE benötigt percentage zwischen 1 und 100.")
+
+    filter_by = str(form.get("filter_by", "")).strip()
+    filter_where = str(form.get("filter_where", "")).strip().upper()
+    filter_value_raw = str(form.get("filter_value", "")).strip()
+
+    bet: dict[str, Any] = {
+        "strategy": strategy,
+        "percentage": percentage,
+        "percentage_gap": percentage_gap,
+        "max_points": max_points,
+        "minimum_points": minimum_points,
+        "stealth_mode": stealth_mode,
+        "delay_mode": delay_mode,
+        "delay": delay,
+    }
+
+    has_filter = bool(filter_by or filter_where or filter_value_raw)
+    if has_filter:
+        if filter_by not in FILTER_BY_OPTIONS:
+            raise ValueError("Ungültiges Filterfeld (by).")
+        if filter_where not in FILTER_WHERE_OPTIONS:
+            raise ValueError("Ungültiger Filteroperator (where).")
+        if filter_value_raw == "":
+            raise ValueError("Filterwert (value) fehlt.")
+        bet["filter_condition"] = {
+            "by": filter_by,
+            "where": filter_where,
+            "value": float(filter_value_raw),
+        }
+
+    return bet
 
 
 def _sanitize_login_mode(value: str | None) -> str:
     mode = (value or "token").strip().lower()
     return mode if mode in VALID_LOGIN_MODES else "token"
+
+
+def _map_priority_values(values: list[str] | Any) -> list[Priority]:
+    if not isinstance(values, list):
+        return [Priority.STREAK, Priority.DROPS, Priority.ORDER]
+    mapped: list[Priority] = []
+    for raw in values:
+        key = str(raw or "").strip().upper()
+        if key in Priority.__members__:
+            mapped.append(Priority[key])
+    return mapped or [Priority.STREAK, Priority.DROPS, Priority.ORDER]
+
+
+def _validate_priority(values: list[str] | Any) -> list[str]:
+    selected = [str(v).strip().upper() for v in values] if isinstance(values, list) else []
+    warnings: list[str] = []
+    if not selected:
+        return ["Keine Priorität gewählt. Empfohlen: STREAK, DROPS, ORDER."]
+    if "ORDER" in selected and ("POINTS_ASCENDING" in selected or "POINTS_DESCEDING" in selected):
+        warnings.append("ORDER zusammen mit POINTS_ASCENDING/POINTS_DESCEDING ist widersprüchlich.")
+    if "POINTS_ASCENDING" in selected and "POINTS_DESCEDING" in selected:
+        warnings.append("POINTS_ASCENDING und POINTS_DESCEDING gleichzeitig ist widersprüchlich.")
+    if "STREAK" in selected and len(selected) == 1:
+        warnings.append("Nur STREAK kann nach erfüllten Streaks zu Leerlauf führen.")
+    return warnings
 
 
 def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, Any]:
@@ -450,6 +601,9 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 .meta { color: #97a0bb; font-size: 0.9rem; }
 .copy-box { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
 .copy-box input { margin: 0; font-family: monospace; }
+.priority-controls { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+.priority-buttons { display: flex; flex-direction: column; gap: 8px; }
+.warning { color: #ffd77d; }
 </style></head><body><div class="container">
 <h1>Twitch Channel Points Miner – Webinterface</h1>
 <p class="meta">Config-Datei: {{ config_path }} | Log-Datei: {{ log_path }}</p>
@@ -490,10 +644,11 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="row"><div><label>Autostart-Modus</label><select name="autostart_mode"><option value="disabled" {% if config.get('autostart_mode', 'enabled') == 'disabled' %}selected{% endif %}>Aus (manuell)</option><option value="enabled" {% if config.get('autostart_mode', 'enabled') == 'enabled' %}selected{% endif %}>An</option><option value="max_tries" {% if config.get('autostart_mode', 'enabled') == 'max_tries' %}selected{% endif %}>An mit Max Login-Trys</option></select></div>
 <div><label>Max Login-Trys (nur Modus "max_tries")</label><input name="max_login_tries" type="number" min="1" value="{{ config.get('max_login_tries', 3) }}"></div></div>
 <label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
+<label>Blacklist (kommagetrennt oder zeilenweise)</label><input name="blacklist" value="{{ ','.join(config.get('blacklist', [])) }}">
 <div class="row"><div><label>Login-Modus</label><select name="login_mode"><option value="token" {% if config.get('login_mode', 'token') == 'token' %}selected{% endif %}>token (empfohlen)</option><option value="credentials" {% if config.get('login_mode', 'token') == 'credentials' %}selected{% endif %}>credentials</option><option value="none" {% if config.get('login_mode', 'token') == 'none' %}selected{% endif %}>none</option></select></div><div></div></div>
 <p class="meta"><strong>token</strong>: Start nur über vorhandene Cookies/Token (ideal für Container ohne interaktiven Login). <strong>credentials</strong>: erlaubt Username/Passwort-Login beim Start (lokal/interaktiv). <strong>none</strong>: überspringt Startup-Login komplett; nutze das nur, wenn Session/Cookies bereits vorbereitet sind.</p>
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
-<div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
+<div><label>Bet Strategy</label><select name="bet_strategy">{% for option in bet_strategies %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
 <div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
 <div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div></div></div>
 <h3>Streamer-Overrides</h3>
@@ -538,6 +693,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 {% if miner_status.last_error %}<p style="color:#ff9f9f">Letzter Fehler: {{ miner_status.last_error }}</p>{% endif %}
 <p class="meta">Startkommando: {{ miner_status.command }}</p>
 {% if miner_action_message %}<p class="meta">Aktion: {{ miner_action_message }}</p>{% endif %}
+<p>Blacklist aktiv: <strong>{% if config.get('blacklist') %}{{ config.get('blacklist')|join(', ') }}{% else %}keine{% endif %}</strong></p>
 <p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
 <div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
@@ -549,6 +705,25 @@ function copyTokenCommand() {
   tokenInput.setSelectionRange(0, 99999);
   navigator.clipboard.writeText(tokenInput.value);
 }
+function syncPriorityOrder() {
+  const select = document.getElementById("priority_select");
+  document.getElementById("priority_order").value = Array.from(select.options).filter(o => o.selected).map(o => o.value).join(",");
+}
+function movePriority(direction) {
+  const select = document.getElementById("priority_select");
+  const idx = select.selectedIndex;
+  if (idx < 0) return;
+  const target = idx + direction;
+  if (target < 0 || target >= select.options.length) return;
+  const a = select.options[idx];
+  const b = select.options[target];
+  select.options[idx] = new Option(b.text, b.value, false, b.selected);
+  select.options[target] = new Option(a.text, a.value, false, a.selected);
+  select.selectedIndex = target;
+  syncPriorityOrder();
+}
+document.getElementById("priority_select")?.addEventListener("change", syncPriorityOrder);
+document.querySelector("form[action='{{ url_for('save') }}']")?.addEventListener("submit", syncPriorityOrder);
 </script>
 </body></html>
 """
@@ -573,12 +748,17 @@ def index() -> str:
         cookie_import=LAST_COOKIE_IMPORT,
         miner_status=MINER_MANAGER.get_status(),
         miner_action_message=request.args.get("miner_message", ""),
+        bet_strategies=BET_STRATEGIES,
+        delay_modes=DELAY_MODES,
+        filter_by_options=FILTER_BY_OPTIONS,
+        filter_where_options=FILTER_WHERE_OPTIONS,
     )
 
 
 @app.post("/save")
 def save() -> Any:
-    streamers = [s.strip() for s in request.form.get("streamers", "").split(",") if s.strip()]
+    streamers = _parse_tag_list(request.form.get("streamers", ""))
+    blacklist = _parse_tag_list(request.form.get("blacklist", ""))
     existing = load_config()
     streamer_overrides: dict[str, Any] = {}
     for streamer_name in streamers:
@@ -603,7 +783,9 @@ def save() -> Any:
         "persistent": existing.get("persistent", ""),
         "cookie_file": existing.get("cookie_file", ""),
         "streamers": streamers,
+        "blacklist": blacklist,
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
+        "priority": priority_values or existing.get("priority", DEFAULT_CONFIG["priority"]),
         "proxy": request.form.get("proxy", "").strip(),
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
         "max_login_tries": max(1, int(request.form.get("max_login_tries", 3))),
