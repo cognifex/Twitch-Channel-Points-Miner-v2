@@ -66,6 +66,11 @@ class Twitch(object):
             logger.info("Auto login disabled. Skipping login during startup.")
             return
 
+        if self.login_mode == "token":
+            logger.info("Token login mode active (cookies/token only).")
+        elif self.login_mode == "credentials":
+            logger.info("Credentials login mode active.")
+
         has_cookies_file = os.path.isfile(self.cookies_file)
 
         if has_cookies_file:
