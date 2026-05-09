@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import uuid
 from datetime import datetime
 import re
 from pathlib import Path
@@ -158,6 +159,67 @@ class MinerProcessManager:
 MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
 
 VALID_LOGIN_MODES = {"none", "token", "credentials"}
+
+
+class RuntimeStatusStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._session_id = str(uuid.uuid4())
+        self._started_at = datetime.utcnow()
+        self._login_state = "unknown"
+        self._active_streamers: dict[str, str] = {}
+        self._errors: list[dict[str, str]] = []
+        self._reconnect_count = 0
+        self._last_log_size = 0
+
+    def ingest_logs(self, log_lines: list[str]) -> None:
+        with self._lock:
+            new_size = len(log_lines)
+            start_idx = self._last_log_size if new_size >= self._last_log_size else 0
+            for line in log_lines[start_idx:]:
+                lowered = line.lower()
+                if "start session" in lowered or "loading data for" in lowered:
+                    self._login_state = "ok"
+                if "login" in lowered and ("fail" in lowered or "error" in lowered):
+                    self._login_state = "failed"
+                if "reconnect" in lowered:
+                    self._reconnect_count += 1
+                if "error" in lowered or "exception" in lowered:
+                    self._errors.append(
+                        {"timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), "message": line}
+                    )
+                    self._errors = self._errors[-200:]
+
+                online_match = re.search(r"Streamer\(username=([^,]+),.*\) is Online", line)
+                if online_match:
+                    self._active_streamers[online_match.group(1)] = "ONLINE"
+                offline_match = re.search(r"Streamer\(username=([^,]+),.*\) is Offline", line)
+                if offline_match:
+                    self._active_streamers.pop(offline_match.group(1), None)
+            self._last_log_size = new_size
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            uptime_seconds = int((datetime.utcnow() - self._started_at).total_seconds())
+            return {
+                "session_id": self._session_id,
+                "uptime_seconds": uptime_seconds,
+                "login_state": self._login_state,
+                "active_streamers": sorted(self._active_streamers.keys()),
+                "errors_count": len(self._errors),
+                "reconnect_count": self._reconnect_count,
+            }
+
+    def streamers(self) -> dict[str, Any]:
+        with self._lock:
+            return {"active_streamers": sorted(self._active_streamers.keys())}
+
+    def errors(self) -> dict[str, Any]:
+        with self._lock:
+            return {"errors": self._errors[-100:]}
+
+
+RUNTIME_STATUS = RuntimeStatusStore()
 
 
 def _sanitize_login_mode(value: str | None) -> str:
@@ -350,29 +412,6 @@ def read_log_tail(lines: int = 200) -> list[str]:
 
 
 
-def extract_runtime_status(log_lines: list[str]) -> dict[str, Any]:
-    status = {"login_ok": False, "login_failed": False, "streamers": {}}
-
-    online_pattern = re.compile(r"Streamer\(username=([^,]+),.*\) is Online")
-    offline_pattern = re.compile(r"Streamer\(username=([^,]+),.*\) is Offline")
-
-    for line in log_lines:
-        lowered = line.lower()
-        if "start session" in lowered or "loading data for" in lowered:
-            status["login_ok"] = True
-        if "login" in lowered and ("fail" in lowered or "error" in lowered):
-            status["login_failed"] = True
-
-        online_match = online_pattern.search(line)
-        if online_match:
-            status["streamers"][online_match.group(1)] = "ONLINE"
-
-        offline_match = offline_pattern.search(line)
-        if offline_match:
-            status["streamers"][offline_match.group(1)] = "OFFLINE"
-
-    return status
-
 TEMPLATE = """
 <!doctype html>
 <html lang="de">
@@ -445,12 +484,15 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <form method="post" action="{{ url_for('miner_stop') }}"><button type="submit" class="button-secondary">Miner stoppen</button></form>
 <form method="post" action="{{ url_for('miner_restart') }}"><button type="submit" class="button-secondary">Miner neu starten</button></form>
 </div>
-<p>Miner-Status: <strong>{{ miner_status.state }}</strong>{% if miner_status.pid %} (PID {{ miner_status.pid }}){% endif %}</p>
-{% if miner_status.last_error %}<p style="color:#ff9f9f">Letzter Fehler: {{ miner_status.last_error }}</p>{% endif %}
+<p>Miner-Status: <strong id="miner-state">{{ miner_status.state }}</strong> <span id="miner-pid">{% if miner_status.pid %}(PID {{ miner_status.pid }}){% endif %}</span></p>
+<p style="color:#ff9f9f" id="miner-error">{% if miner_status.last_error %}Letzter Fehler: {{ miner_status.last_error }}{% endif %}</p>
 <p class="meta">Startkommando: {{ miner_status.command }}</p>
 {% if miner_action_message %}<p class="meta">Aktion: {{ miner_action_message }}</p>{% endif %}
-<p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
-<div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
+<p>Session-ID: <strong id="session-id">-</strong> | Uptime: <strong id="uptime">-</strong></p>
+<p>Login-Status: <strong id="login-state">-</strong> | Reconnects: <strong id="reconnect-count">0</strong></p>
+<p>Aktive Streamer: <strong id="active-streamers">-</strong></p>
+<p>Errors: <strong id="error-count">0</strong></p></div>
+<div class="card"><h2>Debug (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
 </div>
 <script>
@@ -460,6 +502,31 @@ function copyTokenCommand() {
   tokenInput.setSelectionRange(0, 99999);
   navigator.clipboard.writeText(tokenInput.value);
 }
+function fmtUptime(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return `${h}h ${m}m ${s}s`;
+}
+async function refreshApiStatus() {
+  const [statusRes, minerRes] = await Promise.all([
+    fetch('/api/status'),
+    fetch('/api/miner/status')
+  ]);
+  const status = await statusRes.json();
+  const miner = await minerRes.json();
+  document.getElementById('session-id').textContent = status.session_id || '-';
+  document.getElementById('uptime').textContent = fmtUptime(status.uptime_seconds || 0);
+  document.getElementById('login-state').textContent = status.login_state || 'unknown';
+  document.getElementById('reconnect-count').textContent = status.reconnect_count || 0;
+  document.getElementById('active-streamers').textContent = (status.active_streamers || []).join(', ') || '-';
+  document.getElementById('error-count').textContent = status.errors_count || 0;
+  document.getElementById('miner-state').textContent = miner.state || '-';
+  document.getElementById('miner-pid').textContent = miner.pid ? `(PID ${miner.pid})` : '';
+  document.getElementById('miner-error').textContent = miner.last_error ? `Letzter Fehler: ${miner.last_error}` : '';
+}
+refreshApiStatus();
+setInterval(refreshApiStatus, 5000);
 </script>
 </body></html>
 """
@@ -470,7 +537,7 @@ def index() -> str:
     config = load_config()
     logs = read_log_tail()
     saved_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    runtime_status = extract_runtime_status(logs)
+    RUNTIME_STATUS.ingest_logs(logs)
     return render_template_string(
         TEMPLATE,
         config=config,
@@ -478,7 +545,6 @@ def index() -> str:
         saved_at=saved_at,
         config_path=CONFIG_PATH,
         log_path=LOG_PATH,
-        runtime_status=runtime_status,
         login_test=LAST_LOGIN_TEST,
         cookie_import=LAST_COOKIE_IMPORT,
         miner_status=MINER_MANAGER.get_status(),
@@ -631,6 +697,24 @@ def miner_restart() -> Any:
 @app.get("/api/miner/status")
 def api_miner_status() -> Any:
     return jsonify(MINER_MANAGER.get_status())
+
+
+@app.get("/api/status")
+def api_status() -> Any:
+    RUNTIME_STATUS.ingest_logs(read_log_tail())
+    return jsonify(RUNTIME_STATUS.snapshot())
+
+
+@app.get("/api/streamers")
+def api_streamers() -> Any:
+    RUNTIME_STATUS.ingest_logs(read_log_tail())
+    return jsonify(RUNTIME_STATUS.streamers())
+
+
+@app.get("/api/errors")
+def api_errors() -> Any:
+    RUNTIME_STATUS.ingest_logs(read_log_tail())
+    return jsonify(RUNTIME_STATUS.errors())
 
 
 @app.post("/api/miner/start")
