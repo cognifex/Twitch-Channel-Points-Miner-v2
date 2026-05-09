@@ -27,8 +27,9 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Condition, DelayMode, OutcomeKeys, Strategy
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+from TwitchChannelPointsMiner.classes.Settings import Priority
 
 app = Flask(__name__)
 
@@ -427,6 +428,26 @@ class RuntimeStatusStore:
 
 RUNTIME_STATUS = RuntimeStatusStore()
 
+
+
+
+def _parse_tag_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in str(raw).split(",") if part.strip()]
+
+
+def _bool_from_form(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _normalize_streamer_overrides(overrides: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(overrides or {})
+
+
+def build_streamers_from_config(config: dict[str, Any]) -> list[Streamer]:
+    streamers = _parse_tag_list(",".join(config.get("streamers", [])) if isinstance(config.get("streamers"), list) else config.get("streamers", ""))
+    return [Streamer(username=s.lower().strip(), settings=StreamerSettings()) for s in streamers if s.strip()]
 
 def _sanitize_login_mode(value: str | None) -> str:
     mode = (value or "token").strip().lower()
@@ -831,6 +852,9 @@ def index() -> str:
     logs = read_log_tail()
     saved_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     RUNTIME_STATUS.ingest_logs(logs)
+    analytics = config.get("analytics", {})
+    analytics_url = f"http://{analytics.get('host', '127.0.0.1')}:{analytics.get('port', 5000)}"
+    analytics_health = ANALYTICS_MANAGER.get_status()
     return render_template_string(
         TEMPLATE,
         config=config,
@@ -870,6 +894,7 @@ def save() -> Any:
                 "minimum_points": int(request.form.get(f"ov_{key}_bet_minimum_points", existing.get("bet", {}).get("minimum_points", 0))),
             },
         }
+    priority_values = [v for v in request.form.getlist("priority") if str(v).strip()]
     config = {
         "username": existing.get("username", ""),
         "password": existing.get("password", ""),
