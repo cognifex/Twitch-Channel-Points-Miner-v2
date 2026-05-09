@@ -1,6 +1,5 @@
 services:
   miner:
-    image: ${MINER_IMAGE:-twitch-channel-points-miner-v2:local}
     build:
       context: .
       dockerfile: Dockerfile
