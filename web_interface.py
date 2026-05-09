@@ -39,6 +39,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "proxy": "",
     "autostart_mode": "enabled",
     "max_login_tries": 3,
+    "login_mode": "token",
     "bet": {
         "strategy": "SMART",
         "percentage": 5,
@@ -104,12 +105,18 @@ class MinerProcessManager:
             self._state = "starting"
             self._last_error = ""
             try:
+                current_config = load_config()
+                login_mode = _sanitize_login_mode(current_config.get("login_mode"))
+                process_env = os.environ.copy()
+                process_env["TWITCH_LOGIN_MODE"] = login_mode
+
                 self._process = subprocess.Popen(  # noqa: S603
                     self.command,
                     shell=True,  # noqa: S602
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
+                    env=process_env,
                 )
                 self._state = "running"
                 return True, "Miner wurde gestartet."
@@ -149,6 +156,13 @@ class MinerProcessManager:
 
 
 MINER_MANAGER = MinerProcessManager(MINER_COMMAND)
+
+VALID_LOGIN_MODES = {"none", "token", "credentials"}
+
+
+def _sanitize_login_mode(value: str | None) -> str:
+    mode = (value or "token").strip().lower()
+    return mode if mode in VALID_LOGIN_MODES else "token"
 
 
 def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, Any]:
@@ -416,6 +430,8 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="row"><div><label>Autostart-Modus</label><select name="autostart_mode"><option value="disabled" {% if config.get('autostart_mode', 'enabled') == 'disabled' %}selected{% endif %}>Aus (manuell)</option><option value="enabled" {% if config.get('autostart_mode', 'enabled') == 'enabled' %}selected{% endif %}>An</option><option value="max_tries" {% if config.get('autostart_mode', 'enabled') == 'max_tries' %}selected{% endif %}>An mit Max Login-Trys</option></select></div>
 <div><label>Max Login-Trys (nur Modus "max_tries")</label><input name="max_login_tries" type="number" min="1" value="{{ config.get('max_login_tries', 3) }}"></div></div>
 <label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
+<div class="row"><div><label>Login-Modus</label><select name="login_mode"><option value="token" {% if config.get('login_mode', 'token') == 'token' %}selected{% endif %}>token (empfohlen)</option><option value="credentials" {% if config.get('login_mode', 'token') == 'credentials' %}selected{% endif %}>credentials</option><option value="none" {% if config.get('login_mode', 'token') == 'none' %}selected{% endif %}>none</option></select></div><div></div></div>
+<p class="meta"><strong>token</strong>: Start nur über vorhandene Cookies/Token (ideal für Container ohne interaktiven Login). <strong>credentials</strong>: erlaubt Username/Passwort-Login beim Start (lokal/interaktiv). <strong>none</strong>: überspringt Startup-Login komplett; nutze das nur, wenn Session/Cookies bereits vorbereitet sind.</p>
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
 <div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
 <div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
@@ -485,6 +501,7 @@ def save() -> Any:
         "proxy": request.form.get("proxy", "").strip(),
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
         "max_login_tries": max(1, int(request.form.get("max_login_tries", 3))),
+        "login_mode": _sanitize_login_mode(request.form.get("login_mode", existing.get("login_mode", "token"))),
         "bet": {
             "strategy": request.form.get("bet_strategy", "SMART"),
             "percentage": int(request.form.get("bet_percentage", 5)),
