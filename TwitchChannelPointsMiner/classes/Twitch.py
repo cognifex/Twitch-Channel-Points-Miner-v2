@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 class Twitch(object):
-    __slots__ = ["cookies_file", "user_agent", "twitch_login", "running", "auto_login", "prefer_token_login"]
+    __slots__ = ["cookies_file", "user_agent", "twitch_login", "running", "auto_login", "prefer_token_login", "allow_credential_login"]
 
     def __init__(
         self,
@@ -48,7 +48,8 @@ class Twitch(object):
         user_agent,
         password=None,
         auto_login=True,
-        prefer_token_login=False,
+        prefer_token_login=True,
+        allow_credential_login=False,
     ):
         cookies_path = os.path.join(Path().absolute(), "cookies")
         Path(cookies_path).mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,7 @@ class Twitch(object):
         self.running = True
         self.auto_login = auto_login
         self.prefer_token_login = prefer_token_login
+        self.allow_credential_login = allow_credential_login
 
     def login(self):
         if self.auto_login is False:
@@ -75,7 +77,14 @@ class Twitch(object):
 
         if self.prefer_token_login:
             raise BadCredentialsException(
-                f"Token login requested, but cookies file was not found: {self.cookies_file}"
+                "Token-based login is enabled by default, but no cookie file was found. "
+                f"Please provide cookies at: {self.cookies_file}"
+            )
+
+        if self.allow_credential_login is False:
+            raise BadCredentialsException(
+                "Credential login is disabled. Enable 'allow_credential_login=True' "
+                "or provide a cookie file for token login."
             )
 
         if self.twitch_login.login_flow():
