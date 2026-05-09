@@ -78,7 +78,8 @@ class TwitchChannelPointsMiner:
         password: str = None,
         claim_drops_startup: bool = False,
         auto_login: bool = True,
-        prefer_token_login: bool = False,
+        prefer_token_login: bool = True,
+        allow_credential_login: bool = False,
         # Settings for logging and selenium as you can see.
         priority: list = [Priority.STREAK, Priority.DROPS, Priority.ORDER],
         # This settings will be global shared trought Settings class
@@ -108,6 +109,7 @@ class TwitchChannelPointsMiner:
             password,
             auto_login=self.auto_login,
             prefer_token_login=self.prefer_token_login,
+            allow_credential_login=allow_credential_login,
         )
 
         self.claim_drops_startup = claim_drops_startup
