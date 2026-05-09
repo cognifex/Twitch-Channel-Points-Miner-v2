@@ -31,6 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "persistent": "",
     "cookie_file": "",
     "streamers": [],
+    "blacklist": [],
     "make_predictions": True,
     "follow_raid": True,
     "claim_drops": True,
@@ -109,6 +110,13 @@ class MinerProcessManager:
                 login_mode = _sanitize_login_mode(current_config.get("login_mode"))
                 process_env = os.environ.copy()
                 process_env["TWITCH_LOGIN_MODE"] = login_mode
+                blacklist = current_config.get("blacklist", [])
+                if isinstance(blacklist, list):
+                    normalized_blacklist = [item.strip().lower() for item in blacklist if isinstance(item, str) and item.strip()]
+                else:
+                    normalized_blacklist = []
+                process_env["TWITCH_BLACKLIST"] = ",".join(normalized_blacklist)
+                process_env["TWITCH_BLACKLIST_JSON"] = json.dumps(normalized_blacklist)
 
                 self._process = subprocess.Popen(  # noqa: S603
                     self.command,
@@ -164,6 +172,19 @@ def _sanitize_login_mode(value: str | None) -> str:
     mode = (value or "token").strip().lower()
     return mode if mode in VALID_LOGIN_MODES else "token"
 
+
+
+
+def _parse_tag_list(raw_value: str) -> list[str]:
+    items = re.split(r"[,\n]", raw_value or "")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = item.strip().lower()
+        if value and value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
 
 def run_login_test(username: str, password: str, proxy: str = "") -> dict[str, Any]:
     details: list[str] = []
@@ -430,6 +451,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div class="row"><div><label>Autostart-Modus</label><select name="autostart_mode"><option value="disabled" {% if config.get('autostart_mode', 'enabled') == 'disabled' %}selected{% endif %}>Aus (manuell)</option><option value="enabled" {% if config.get('autostart_mode', 'enabled') == 'enabled' %}selected{% endif %}>An</option><option value="max_tries" {% if config.get('autostart_mode', 'enabled') == 'max_tries' %}selected{% endif %}>An mit Max Login-Trys</option></select></div>
 <div><label>Max Login-Trys (nur Modus "max_tries")</label><input name="max_login_tries" type="number" min="1" value="{{ config.get('max_login_tries', 3) }}"></div></div>
 <label>Streamer (kommagetrennt)</label><input name="streamers" value="{{ ','.join(config.get('streamers', [])) }}">
+<label>Blacklist (kommagetrennt oder zeilenweise)</label><input name="blacklist" value="{{ ','.join(config.get('blacklist', [])) }}">
 <div class="row"><div><label>Login-Modus</label><select name="login_mode"><option value="token" {% if config.get('login_mode', 'token') == 'token' %}selected{% endif %}>token (empfohlen)</option><option value="credentials" {% if config.get('login_mode', 'token') == 'credentials' %}selected{% endif %}>credentials</option><option value="none" {% if config.get('login_mode', 'token') == 'none' %}selected{% endif %}>none</option></select></div><div></div></div>
 <p class="meta"><strong>token</strong>: Start nur über vorhandene Cookies/Token (ideal für Container ohne interaktiven Login). <strong>credentials</strong>: erlaubt Username/Passwort-Login beim Start (lokal/interaktiv). <strong>none</strong>: überspringt Startup-Login komplett; nutze das nur, wenn Session/Cookies bereits vorbereitet sind.</p>
 <div class="row"><div><label>Chat Presence</label><select name="chat_presence">{% for option in ['ALWAYS','NEVER','ONLINE','OFFLINE'] %}<option value="{{ option }}" {% if config.get('chat_presence') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div>
@@ -449,6 +471,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 {% if miner_status.last_error %}<p style="color:#ff9f9f">Letzter Fehler: {{ miner_status.last_error }}</p>{% endif %}
 <p class="meta">Startkommando: {{ miner_status.command }}</p>
 {% if miner_action_message %}<p class="meta">Aktion: {{ miner_action_message }}</p>{% endif %}
+<p>Blacklist aktiv: <strong>{% if config.get('blacklist') %}{{ config.get('blacklist')|join(', ') }}{% else %}keine{% endif %}</strong></p>
 <p>Login-Status:{% if runtime_status.login_failed %}<strong style="color:#ff7d7d"> Fehlgeschlagen</strong>{% elif runtime_status.login_ok %}<strong style="color:#7dff9a"> Erfolgreich gestartet</strong>{% else %}<strong style="color:#ffd77d"> Noch kein eindeutiger Login-Status</strong>{% endif %}</p></div>
 <div class="card"><h2>Monitoring (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
@@ -488,7 +511,8 @@ def index() -> str:
 
 @app.post("/save")
 def save() -> Any:
-    streamers = [s.strip() for s in request.form.get("streamers", "").split(",") if s.strip()]
+    streamers = _parse_tag_list(request.form.get("streamers", ""))
+    blacklist = _parse_tag_list(request.form.get("blacklist", ""))
     existing = load_config()
     config = {
         "username": existing.get("username", ""),
@@ -497,6 +521,7 @@ def save() -> Any:
         "persistent": existing.get("persistent", ""),
         "cookie_file": existing.get("cookie_file", ""),
         "streamers": streamers,
+        "blacklist": blacklist,
         "chat_presence": request.form.get("chat_presence", "ONLINE"),
         "proxy": request.form.get("proxy", "").strip(),
         "autostart_mode": request.form.get("autostart_mode", "enabled"),
