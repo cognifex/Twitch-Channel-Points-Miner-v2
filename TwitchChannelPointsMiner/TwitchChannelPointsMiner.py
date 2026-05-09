@@ -268,7 +268,7 @@ class TwitchChannelPointsMiner:
 
             max_login_tries = max(1, int(os.getenv("TCPM_LOGIN_MAX_TRIES", "1")))
             retry_delay_seconds = max(1, int(os.getenv("TCPM_LOGIN_RETRY_DELAY", "20")))
-            keep_alive_on_login_failure = os.getenv("TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+            keep_alive_on_login_failure = os.getenv("TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE", "1").strip().lower() in {"1", "true", "yes", "on"}
             login_exception = None
 
             for attempt in range(1, max_login_tries + 1):
