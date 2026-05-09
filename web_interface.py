@@ -14,6 +14,8 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 import requests
 
 from TwitchChannelPointsMiner.classes.TwitchLogin import TwitchLogin
+from TwitchChannelPointsMiner.classes.Telegram import Telegram
+from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 
 app = Flask(__name__)
@@ -45,6 +47,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "percentage": 5,
         "max_points": 50000,
         "minimum_points": 0,
+    },
+    "telegram": {
+        "chat_id": "",
+        "token": "",
+        "events": ["BET_WIN", "BET_LOSE"],
+        "disable_notification": False,
+    },
+    "discord": {
+        "webhook_api": "",
+        "events": ["BET_WIN", "BET_LOSE"],
     },
 }
 
@@ -338,6 +350,38 @@ def save_config(config: dict[str, Any]) -> None:
         json.dump(config, fp, indent=2)
 
 
+def _parse_events(value: str) -> list[str]:
+    return [event.strip() for event in value.split(",") if event.strip()]
+
+
+def _safe_chat_id(value: str | int | None) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def build_logger_settings_payload(config: dict[str, Any]) -> dict[str, Any]:
+    telegram_config = config.get("telegram", {}) or {}
+    discord_config = config.get("discord", {}) or {}
+
+    return {
+        "telegram": {
+            "chat_id": _safe_chat_id(telegram_config.get("chat_id")),
+            "token": (telegram_config.get("token") or "").strip(),
+            "events": [str(e).strip() for e in telegram_config.get("events", []) if str(e).strip()],
+            "disable_notification": bool(telegram_config.get("disable_notification", False)),
+        },
+        "discord": {
+            "webhook_api": (discord_config.get("webhook_api") or "").strip(),
+            "events": [str(e).strip() for e in discord_config.get("events", []) if str(e).strip()],
+        },
+    }
+
+
 def read_log_tail(lines: int = 200) -> list[str]:
     if not LOG_PATH.exists():
         return ["Noch keine Logs gefunden."]
@@ -398,7 +442,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <form method="post" action="{{ url_for('save_login') }}">
 <label>Username</label><input name="username" value="{{ config.get('username', '') }}">
 <label>Password</label><input name="password" type="password" value="{{ config.get('password', '') }}">
-<label>auth-token (optional)</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>auth-token (optional)</label><input name="auth_token" type="password" autocomplete="off" value="{{ config.get('auth_token', '') }}">
 <p class="meta">Wenn Twitch-Login per Passwort blockiert ist (z. B. HTTP 404), nutze auth-token + optional persistent-ID aus deinen Browser-Cookies.</p>
 <p class="meta">Token holen: In Twitch eingeloggt <strong>F12 → Konsole</strong> öffnen und folgenden Befehl ausführen:</p>
 <div class="copy-box"><input id="token-command" readonly value="document.cookie.split('; ').find(c => c.startsWith('auth-token='))?.split('=')[1]"><button type="button" class="button-secondary" onclick="copyTokenCommand()">Befehl kopieren</button></div>
@@ -414,7 +458,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 {% endfor %}</pre>
 <h3>Cookie-Import</h3>
 <form method="post" action="{{ url_for('save_cookies') }}">
-<label>auth-token</label><input name="auth_token" value="{{ config.get('auth_token', '') }}">
+<label>auth-token</label><input name="auth_token" type="password" autocomplete="off" value="{{ config.get('auth_token', '') }}">
 <label>persistent (optional User-ID)</label><input name="persistent" value="{{ config.get('persistent', '') }}">
 <button type="submit">Cookies speichern und übernehmen</button></form>
 <form method="post" action="{{ url_for('import_cookie_file') }}">
@@ -436,6 +480,14 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <div><label>Bet Strategy</label><select name="bet_strategy">{% for option in ['SMART','PERCENTAGE','MOST_VOTED'] %}<option value="{{ option }}" {% if config.get('bet', {}).get('strategy') == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></div></div>
 <div class="row"><div><label>Bet Percentage</label><input name="bet_percentage" type="number" min="1" max="100" value="{{ config.get('bet', {}).get('percentage', 5) }}"></div><div><label>Max Points</label><input name="bet_max_points" type="number" min="1" value="{{ config.get('bet', {}).get('max_points', 50000) }}"></div></div>
 <div class="row"><div><label>Minimum Points</label><input name="bet_minimum_points" type="number" min="0" value="{{ config.get('bet', {}).get('minimum_points', 0) }}"></div><div></div></div>
+<h3>Telegram</h3>
+<div class="row"><div><label>Chat ID</label><input name="telegram_chat_id" value="{{ config.get('telegram', {}).get('chat_id', '') }}"></div><div><label>Token</label><input name="telegram_token" type="password" autocomplete="off" value="{{ config.get('telegram', {}).get('token', '') }}"></div></div>
+<div class="row"><div><label>Events (kommagetrennt)</label><input name="telegram_events" value="{{ ','.join(config.get('telegram', {}).get('events', [])) }}"></div><div><label><input type="checkbox" name="telegram_disable_notification" {% if config.get('telegram', {}).get('disable_notification') %}checked{% endif %}> Disable Notification</label></div></div>
+<h3>Discord</h3>
+<div class="row"><div><label>Webhook API</label><input name="discord_webhook_api" type="password" autocomplete="off" value="{{ config.get('discord', {}).get('webhook_api', '') }}"></div><div><label>Events (kommagetrennt)</label><input name="discord_events" value="{{ ','.join(config.get('discord', {}).get('events', [])) }}"></div></div>
+<div class="button-row">
+<button type="submit" formaction="{{ url_for('send_test_message') }}" formmethod="post" class="button-secondary">Testnachricht senden</button>
+</div>
 <button type="submit">Speichern</button></form></div>
 
 <div class="card"><h2>Status</h2>
@@ -507,6 +559,16 @@ def save() -> Any:
             "percentage": int(request.form.get("bet_percentage", 5)),
             "max_points": int(request.form.get("bet_max_points", 50000)),
             "minimum_points": int(request.form.get("bet_minimum_points", 0)),
+        },
+        "telegram": {
+            "chat_id": request.form.get("telegram_chat_id", "").strip(),
+            "token": request.form.get("telegram_token", "").strip(),
+            "events": _parse_events(request.form.get("telegram_events", "")),
+            "disable_notification": request.form.get("telegram_disable_notification") == "on",
+        },
+        "discord": {
+            "webhook_api": request.form.get("discord_webhook_api", "").strip(),
+            "events": _parse_events(request.form.get("discord_events", "")),
         },
     }
     save_config(config)
@@ -655,6 +717,46 @@ def api_miner_restart() -> Any:
     payload = MINER_MANAGER.get_status()
     payload.update({"success": success, "message": message})
     return jsonify(payload), (200 if success else 409)
+
+
+@app.post("/send-test-message")
+def send_test_message() -> Any:
+    config = load_config()
+    payload = build_logger_settings_payload(config)
+    errors: list[str] = []
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    text = f"WebUI Testnachricht ({now})"
+
+    telegram_data = payload["telegram"]
+    if telegram_data["chat_id"] and telegram_data["token"]:
+        try:
+            Telegram(
+                chat_id=telegram_data["chat_id"],
+                token=telegram_data["token"],
+                events=telegram_data["events"],
+                disable_notification=telegram_data["disable_notification"],
+            ).send(text, "WATCH_STREAK")
+        except Exception as exc:
+            errors.append(f"Telegram Fehler: {exc.__class__.__name__}")
+    else:
+        errors.append("Telegram nicht konfiguriert (chat_id/token fehlen).")
+
+    discord_data = payload["discord"]
+    if discord_data["webhook_api"]:
+        try:
+            Discord(webhook_api=discord_data["webhook_api"], events=discord_data["events"]).send(text, "WATCH_STREAK")
+        except Exception as exc:
+            errors.append(f"Discord Fehler: {exc.__class__.__name__}")
+    else:
+        errors.append("Discord nicht konfiguriert (webhook_api fehlt).")
+
+    message = "Testnachricht gesendet." if not errors else " | ".join(errors)
+    return redirect(url_for("index", miner_message=message))
+
+
+@app.get("/api/config/logger-settings")
+def api_logger_settings() -> Any:
+    return jsonify(build_logger_settings_payload(load_config()))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("WEBUI_PORT", "8080")), debug=False)
