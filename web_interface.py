@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime
 import re
@@ -27,8 +28,9 @@ from TwitchChannelPointsMiner.classes.Telegram import Telegram
 from TwitchChannelPointsMiner.classes.Discord import Discord
 from TwitchChannelPointsMiner.constants import CLIENT_ID, USER_AGENTS
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
-from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Strategy
+from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, Condition, DelayMode, OutcomeKeys, Strategy
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+from TwitchChannelPointsMiner.classes.Settings import Priority
 
 app = Flask(__name__)
 
@@ -135,6 +137,7 @@ class MinerProcessManager:
                 return False, f"Config-Datei fehlt: {CONFIG_PATH}"
             self._state = "starting"
             self._last_error = ""
+            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             try:
                 current_config = load_config()
                 login_mode = _sanitize_login_mode(current_config.get("login_mode"))
@@ -143,14 +146,35 @@ class MinerProcessManager:
                 process_env["TWITCH_LOGIN_MODE"] = login_mode
                 process_env["TWITCH_PRIORITY"] = json.dumps([item.name for item in mapped_priority])
 
+                autostart_mode = str(current_config.get("autostart_mode", "enabled")).strip().lower()
+                max_login_tries = max(1, int(current_config.get("max_login_tries", 3)))
+                process_env["TCPM_LOGIN_MAX_TRIES"] = str(max_login_tries)
+                if autostart_mode == "disabled":
+                    process_env["TWITCH_LOGIN_MODE"] = "none"
+                if autostart_mode in {"enabled", "max_tries"}:
+                    process_env["TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE"] = "1"
+                else:
+                    process_env["TCPM_KEEP_ALIVE_ON_LOGIN_FAILURE"] = "0"
+
+                auth_token = str(current_config.get("auth_token", "")).strip()
+                if auth_token:
+                    process_env["TWITCH_AUTH_TOKEN"] = auth_token
+
                 self._process = subprocess.Popen(  # noqa: S603
                     self.command,
                     shell=True,  # noqa: S602
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=open(LOG_PATH, "a", encoding="utf-8"),  # noqa: SIM115
+                    stderr=subprocess.STDOUT,
                     start_new_session=True,
                     env=process_env,
                 )
+                time.sleep(1)
+                if self._process.poll() is not None:
+                    code = self._process.poll()
+                    self._state = "error"
+                    self._last_error = f"Miner beendet direkt nach Start (Code {code}). Siehe Log: {LOG_PATH}"
+                    self._process = None
+                    return False, self._last_error
                 self._state = "running"
                 return True, "Miner wurde gestartet."
             except Exception as exc:
@@ -376,6 +400,7 @@ class RuntimeStatusStore:
         self._active_streamers: dict[str, str] = {}
         self._errors: list[dict[str, str]] = []
         self._reconnect_count = 0
+        self._streak_counts: dict[str, int] = {}
         self._last_log_size = 0
 
     def ingest_logs(self, log_lines: list[str]) -> None:
@@ -396,12 +421,22 @@ class RuntimeStatusStore:
                     )
                     self._errors = self._errors[-200:]
 
-                online_match = re.search(r"Streamer\(username=([^,]+),.*\) is Online", line)
+                online_match = re.search(r"Streamer\(username=([^,]+),.*\) is Online", line) or re.search(r"([A-Za-z0-9_]+) is Online!?", line)
                 if online_match:
-                    self._active_streamers[online_match.group(1)] = "ONLINE"
-                offline_match = re.search(r"Streamer\(username=([^,]+),.*\) is Offline", line)
+                    username = online_match.group(1).lower()
+                    self._active_streamers[username] = "ONLINE"
+                    self._streak_counts.setdefault(username, 0)
+
+                offline_match = re.search(r"Streamer\(username=([^,]+),.*\) is Offline", line) or re.search(r"([A-Za-z0-9_]+) is Offline!?", line)
                 if offline_match:
-                    self._active_streamers.pop(offline_match.group(1), None)
+                    self._active_streamers.pop(offline_match.group(1).lower(), None)
+
+                streak_match = re.search(r"watch streak", line, re.IGNORECASE)
+                if streak_match:
+                    streamer_hint = re.search(r"Streamer\(username=([^,]+),", line)
+                    if streamer_hint:
+                        key = streamer_hint.group(1).lower()
+                        self._streak_counts[key] = self._streak_counts.get(key, 0) + 1
             self._last_log_size = new_size
 
     def snapshot(self) -> dict[str, Any]:
@@ -414,6 +449,7 @@ class RuntimeStatusStore:
                 "active_streamers": sorted(self._active_streamers.keys()),
                 "errors_count": len(self._errors),
                 "reconnect_count": self._reconnect_count,
+                "streak_counts": self._streak_counts,
             }
 
     def streamers(self) -> dict[str, Any]:
@@ -427,6 +463,67 @@ class RuntimeStatusStore:
 
 RUNTIME_STATUS = RuntimeStatusStore()
 
+
+
+
+def _parse_tag_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in str(raw).split(",") if part.strip()]
+
+
+def _bool_from_form(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _normalize_streamer_overrides(overrides: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(overrides or {})
+
+
+def build_streamers_from_config(config: dict[str, Any]) -> list[Streamer]:
+    streamers = _parse_tag_list(",".join(config.get("streamers", [])) if isinstance(config.get("streamers"), list) else config.get("streamers", ""))
+    return [Streamer(username=s.lower().strip(), settings=StreamerSettings()) for s in streamers if s.strip()]
+
+
+
+def _fetch_streamer_online(username: str) -> bool | None:
+    try:
+        payload = {
+            "operationName": "VideoPlayerStreamInfoOverlayChannel",
+            "variables": {"channel": username},
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "198492e0857f6aedead9665c81c5a06d67b25b58034649687124083ff288597d",
+                }
+            },
+        }
+        response = requests.post(
+            "https://gql.twitch.tv/gql",
+            headers={"Client-Id": CLIENT_ID, "Content-Type": "application/json"},
+            json=payload,
+            timeout=6,
+        )
+        response.raise_for_status()
+        user = response.json().get("data", {}).get("user")
+        return bool(user and user.get("stream"))
+    except Exception:
+        return None
+
+
+def _build_streamer_presence(config: dict[str, Any], snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    configured = [str(s).strip().lower() for s in config.get("streamers", []) if str(s).strip()]
+    joined = set(snapshot.get("active_streamers", []))
+    rows: list[dict[str, Any]] = []
+    for name in configured:
+        online = _fetch_streamer_online(name)
+        rows.append({
+            "username": name,
+            "online": online,
+            "joined": name in joined,
+            "state": "ONLINE_JOINED" if online and name in joined else ("ONLINE_NOT_JOINED" if online else ("OFFLINE" if online is False else "UNKNOWN")),
+        })
+    return rows
 
 def _sanitize_login_mode(value: str | None) -> str:
     mode = (value or "token").strip().lower()
@@ -783,6 +880,8 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <p>Session-ID: <strong id="session-id">-</strong> | Uptime: <strong id="uptime">-</strong></p>
 <p>Login-Status: <strong id="login-state">-</strong> | Reconnects: <strong id="reconnect-count">0</strong></p>
 <p>Aktive Streamer: <strong id="active-streamers">-</strong></p>
+<p>Streak-Counts: <strong id="streak-counts">-</strong></p>
+<p>Join-Status: <strong id="join-status">-</strong></p>
 <p>Errors: <strong id="error-count">0</strong></p></div>
 <div class="card"><h2>Debug (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
@@ -813,6 +912,12 @@ async function refreshApiStatus() {
   document.getElementById('reconnect-count').textContent = status.reconnect_count || 0;
   document.getElementById('active-streamers').textContent = (status.active_streamers || []).join(', ') || '-';
   document.getElementById('error-count').textContent = status.errors_count || 0;
+  const streaks = status.streak_counts || {};
+  const streakText = Object.keys(streaks).length ? Object.entries(streaks).map(([k,v]) => `${k}: ${v}`).join(', ') : '-';
+  document.getElementById('streak-counts').textContent = streakText;
+  const presence = status.streamer_presence || [];
+  const presenceText = presence.length ? presence.map(p => `${p.username}:${p.state}`).join(' | ') : '-';
+  document.getElementById('join-status').textContent = presenceText;
   document.getElementById('miner-state').textContent = miner.state || '-';
   document.getElementById('miner-pid').textContent = miner.pid ? `(PID ${miner.pid})` : '';
   document.getElementById('miner-error').textContent = miner.last_error ? `Letzter Fehler: ${miner.last_error}` : '';
@@ -831,6 +936,9 @@ def index() -> str:
     logs = read_log_tail()
     saved_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     RUNTIME_STATUS.ingest_logs(logs)
+    analytics = config.get("analytics", {})
+    analytics_url = f"http://{analytics.get('host', '127.0.0.1')}:{analytics.get('port', 5000)}"
+    analytics_health = ANALYTICS_MANAGER.get_status()
     return render_template_string(
         TEMPLATE,
         config=config,
@@ -870,6 +978,7 @@ def save() -> Any:
                 "minimum_points": int(request.form.get(f"ov_{key}_bet_minimum_points", existing.get("bet", {}).get("minimum_points", 0))),
             },
         }
+    priority_values = [v for v in request.form.getlist("priority") if str(v).strip()]
     config = {
         "username": existing.get("username", ""),
         "password": existing.get("password", ""),
@@ -1066,7 +1175,9 @@ def api_miner_status() -> Any:
 @app.get("/api/status")
 def api_status() -> Any:
     RUNTIME_STATUS.ingest_logs(read_log_tail())
-    return jsonify(RUNTIME_STATUS.snapshot())
+    snapshot = RUNTIME_STATUS.snapshot()
+    snapshot["streamer_presence"] = _build_streamer_presence(load_config(), snapshot)
+    return jsonify(snapshot)
 
 
 @app.get("/api/streamers")
