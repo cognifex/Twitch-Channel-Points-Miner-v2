@@ -155,12 +155,30 @@ class Twitch(object):
             main_page_request = requests.get(streamer.streamer_url, headers=headers)
             response = main_page_request.text
             regex_settings = "(https://static.twitchcdn.net/config/settings.*?js)"
-            settings_url = re.search(regex_settings, response).group(1)
+            settings_match = re.search(regex_settings, response)
+            if settings_match is None:
+                logger.warning(
+                    "Unable to extract Twitch settings URL for %s. "
+                    "Skipping spade_url update for this cycle.",
+                    streamer.username,
+                )
+                streamer.stream.spade_url = None
+                return
+            settings_url = settings_match.group(1)
 
             settings_request = requests.get(settings_url, headers=headers)
             response = settings_request.text
             regex_spade = '"spade_url":"(.*?)"'
-            streamer.stream.spade_url = re.search(regex_spade, response).group(1)
+            spade_match = re.search(regex_spade, response)
+            if spade_match is None:
+                logger.warning(
+                    "Unable to extract spade_url from Twitch settings payload for %s. "
+                    "Skipping spade_url update for this cycle.",
+                    streamer.username,
+                )
+                streamer.stream.spade_url = None
+                return
+            streamer.stream.spade_url = spade_match.group(1)
         except requests.exceptions.RequestException as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
 
