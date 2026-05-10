@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 import re
 from pathlib import Path
@@ -38,6 +39,8 @@ CONFIG_PATH = Path(os.getenv("WEBUI_CONFIG_PATH", "/data/config.json"))
 LOG_PATH = Path(os.getenv("WEBUI_LOG_PATH", "/data/logs/latest.log"))
 COOKIES_PATH = Path(os.getenv("WEBUI_COOKIES_PATH", "/data/cookies"))
 MINER_COMMAND = os.getenv("WEBUI_MINER_COMMAND", "python /data/run.py")
+WEBUI_LOG_TAIL_LINES = max(10, int(os.getenv("WEBUI_LOG_TAIL_LINES", "200")))
+WEBUI_MAX_LOG_LINE_CHARS = max(256, int(os.getenv("WEBUI_MAX_LOG_LINE_CHARS", "4096")))
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -800,14 +803,20 @@ def build_logger_settings_payload(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def read_log_tail(lines: int = 200) -> list[str]:
+def read_log_tail(lines: int = WEBUI_LOG_TAIL_LINES) -> list[str]:
     if not LOG_PATH.exists():
         return ["Noch keine Logs gefunden."]
 
     with LOG_PATH.open("r", encoding="utf-8", errors="ignore") as fp:
-        content = fp.readlines()
+        tail = deque(fp, maxlen=lines)
 
-    return [line.rstrip("\n") for line in content[-lines:]]
+    result: list[str] = []
+    for raw_line in tail:
+        line = raw_line.rstrip("\n")
+        if len(line) > WEBUI_MAX_LOG_LINE_CHARS:
+            line = f"{line[:WEBUI_MAX_LOG_LINE_CHARS]} … [truncated]"
+        result.append(line)
+    return result
 
 
 
