@@ -96,6 +96,22 @@ class LoggerSettings:
         self.discord = discord
 
 
+
+
+class BoundedQueueHandler(QueueHandler):
+    """QueueHandler that bounds memory by dropping oldest records when full."""
+
+    def enqueue(self, record):
+        while True:
+            try:
+                self.queue.put_nowait(record)
+                break
+            except queue.Full:
+                try:
+                    self.queue.get_nowait()
+                except queue.Empty:
+                    break
+
 class GlobalFormatter(logging.Formatter):
     def __init__(self, *, fmt, settings: LoggerSettings, datefmt=None):
         self.settings = settings
@@ -161,8 +177,9 @@ def configure_loggers(username, settings):
         init(autoreset=True)
 
     # Queue handler that will handle the logger queue
-    logger_queue = queue.Queue(-1)
-    queue_handler = QueueHandler(logger_queue)
+    log_queue_size = int(os.getenv("TCPM_LOG_QUEUE_SIZE", "10000"))
+    logger_queue = queue.Queue(maxsize=log_queue_size)
+    queue_handler = BoundedQueueHandler(logger_queue)
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
     # Add the queue handler to the root logger
