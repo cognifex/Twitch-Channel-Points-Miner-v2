@@ -19,6 +19,7 @@ from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.Drop import Drop
 from TwitchChannelPointsMiner.classes.Exceptions import (
     BadCredentialsException,
+    LoginResponseParseException,
     StreamerDoesNotExistException,
     StreamerIsOfflineException,
 )
@@ -715,6 +716,7 @@ class Twitch(object):
 
     def sync_campaigns(self, streamers, chunk_size=3):
         campaigns_update = 0
+        campaigns = []
         while self.running:
             try:
                 # Get update from dashboard each 60minutes
@@ -757,7 +759,12 @@ class Twitch(object):
                             )
                         )
 
-            except (ValueError, KeyError, requests.exceptions.ConnectionError) as e:
+            except (
+                ValueError,
+                KeyError,
+                requests.exceptions.ConnectionError,
+                LoginResponseParseException,
+            ) as e:
                 logger.error(f"Error while syncing inventory: {e}")
                 self.__check_connection_handler(chunk_size)
 

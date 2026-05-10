@@ -280,9 +280,11 @@ class TwitchLogin(object):
 
     def get_user_id(self):
         persistent = self.get_cookie_value("persistent")
-        user_id = (
-            int(persistent.split("%")[0]) if persistent is not None else self.user_id
-        )
+        user_id = self.user_id
+        if persistent is not None:
+            persistent_value = str(persistent).split("%")[0].strip()
+            if persistent_value.isdigit():
+                user_id = int(persistent_value)
         if user_id is None:
             if self.__set_user_id() is True:
                 return self.user_id
