@@ -464,6 +464,17 @@ class RuntimeStatusStore:
         with self._lock:
             return {"errors": self._errors[-100:]}
 
+    def reset(self) -> None:
+        with self._lock:
+            self._session_id = str(uuid.uuid4())
+            self._started_at = datetime.utcnow()
+            self._login_state = "unknown"
+            self._active_streamers = {}
+            self._errors = []
+            self._reconnect_count = 0
+            self._streak_counts = {}
+            self._last_log_size = 0
+
 
 RUNTIME_STATUS = RuntimeStatusStore()
 
@@ -912,7 +923,9 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <p>Streak-Counts: <strong id="streak-counts">-</strong></p>
 <p>Join-Status: <strong id="join-status">-</strong></p>
 <p>Errors: <strong id="error-count">0</strong></p></div>
-<div class="card"><h2>Debug (Live-Log Tail)</h2><pre>{% for line in logs %}{{ line }}
+<div class="card"><h2>Debug (Live-Log Tail)</h2>
+<div class="button-row"><button type="button" class="button-secondary" onclick="clearDebugState()">Debug + Status clearen</button></div>
+<pre>{% for line in logs %}{{ line }}
 {% endfor %}</pre></div>
 </div>
 <script>
@@ -950,6 +963,15 @@ async function refreshApiStatus() {
   document.getElementById('miner-state').textContent = miner.state || '-';
   document.getElementById('miner-pid').textContent = miner.pid ? `(PID ${miner.pid})` : '';
   document.getElementById('miner-error').textContent = miner.last_error ? `Letzter Fehler: ${miner.last_error}` : '';
+}
+async function clearDebugState() {
+  const res = await fetch('/api/debug/clear', { method: 'POST' });
+  const payload = await res.json();
+  if (!res.ok || !payload.success) {
+    alert(`Clear fehlgeschlagen: ${payload.message || 'unbekannter Fehler'}`);
+    return;
+  }
+  window.location.reload();
 }
 refreshApiStatus();
 setInterval(refreshApiStatus, 5000);
@@ -1243,6 +1265,17 @@ def api_miner_restart() -> Any:
     payload = MINER_MANAGER.get_status()
     payload.update({"success": success, "message": message})
     return jsonify(payload), (200 if success else 409)
+
+
+@app.post("/api/debug/clear")
+def api_debug_clear() -> Any:
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LOG_PATH.write_text("", encoding="utf-8")
+        RUNTIME_STATUS.reset()
+        return jsonify({"success": True, "message": "Debug-Log und Runtime-Status wurden geleert."})
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"{exc.__class__.__name__}: {exc}"}), 500
 
 
 @app.post("/send-test-message")
