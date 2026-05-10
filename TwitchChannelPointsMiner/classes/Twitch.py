@@ -5,6 +5,7 @@
 
 
 import copy
+import json
 import logging
 import os
 import random
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class Twitch(object):
-    __slots__ = ["cookies_file", "user_agent", "twitch_login", "running", "login_mode", "allow_credential_login"]
+    __slots__ = ["cookies_file", "user_agent", "twitch_login", "running", "login_mode", "allow_credential_login", "_spade_cache_file"]
 
     def __init__(
         self,
@@ -58,6 +59,7 @@ class Twitch(object):
         self.twitch_login = TwitchLogin(
             CLIENT_ID, username, self.user_agent, password=password
         )
+        self._spade_cache_file = os.path.join(Path().absolute(), "cache", "spade_url.json")
         self.running = True
         self.login_mode = login_mode
         self.allow_credential_login = allow_credential_login
@@ -153,8 +155,19 @@ class Twitch(object):
     def get_spade_url(self, streamer):
         try:
             headers = {"User-Agent": self.user_agent}
-            fallback_spade_url = os.getenv("TWITCH_SPADE_URL", "https://spade.twitch.tv/track")
+            fallback_spade_url = os.getenv("TWITCH_SPADE_URL", "").strip() or None
             session = self.twitch_login.session
+            if fallback_spade_url:
+                streamer.stream.spade_url = fallback_spade_url
+                self._save_spade_url_cache(fallback_spade_url, "env")
+                logger.info("spade_url source=env")
+                return
+
+            cached_spade_url = self._load_spade_url_cache()
+            if cached_spade_url:
+                streamer.stream.spade_url = cached_spade_url
+                logger.info("spade_url source=cache")
+
             main_page_request = session.get(streamer.streamer_url, headers=headers, timeout=15)
             response = main_page_request.text
             previous_spade_url = streamer.stream.spade_url
@@ -163,6 +176,8 @@ class Twitch(object):
             direct_spade_match = re.search(r'"spade_url":"(https?:\\?/\\?/[^"]+)"', response)
             if direct_spade_match:
                 streamer.stream.spade_url = direct_spade_match.group(1).replace("\\/", "/")
+                self._save_spade_url_cache(streamer.stream.spade_url, "page")
+                logger.info("spade_url source=page")
                 return
 
             regex_settings = "(https://static.twitchcdn.net/config/settings.*?js)"
@@ -192,10 +207,35 @@ class Twitch(object):
             streamer.stream.spade_url = spade_match.group(1).replace("\\/", "/")
             if not streamer.stream.spade_url:
                 streamer.stream.spade_url = previous_spade_url or fallback_spade_url
+            else:
+                self._save_spade_url_cache(streamer.stream.spade_url, "settings")
+                logger.info("spade_url source=settings")
         except requests.exceptions.RequestException as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
             if streamer.stream.spade_url is None:
-                streamer.stream.spade_url = fallback_spade_url
+                streamer.stream.spade_url = fallback_spade_url or self._load_spade_url_cache()
+
+    def _load_spade_url_cache(self):
+        try:
+            if not os.path.exists(self._spade_cache_file):
+                return None
+            with open(self._spade_cache_file, "r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+            return (payload.get("spade_url") or "").strip() or None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _save_spade_url_cache(self, spade_url, source):
+        if not spade_url:
+            return
+        try:
+            Path(self._spade_cache_file).parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = f"{self._spade_cache_file}.tmp"
+            with open(tmp_file, "w", encoding="utf-8") as fp:
+                json.dump({"spade_url": spade_url, "source": source, "saved_at": int(time.time())}, fp)
+            os.replace(tmp_file, self._spade_cache_file)
+        except OSError:
+            pass
 
     def get_broadcast_id(self, streamer):
         json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)

@@ -409,6 +409,12 @@ class RuntimeStatusStore:
         self._reconnect_count = 0
         self._streak_counts: dict[str, int] = {}
         self._last_log_size = 0
+        self._spade_status: dict[str, Any] = {
+            "discovery_source": "unknown",
+            "last_success_at": None,
+            "last_error": None,
+            "fallback_in_use": False,
+        }
 
     def ingest_logs(self, log_lines: list[str]) -> None:
         with self._lock:
@@ -427,6 +433,13 @@ class RuntimeStatusStore:
                         {"timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), "message": line}
                     )
                     self._errors = self._errors[-200:]
+                if "spade_url source=" in lowered:
+                    source = line.split("spade_url source=", 1)[1].strip()
+                    self._spade_status["discovery_source"] = source
+                    self._spade_status["last_success_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                    self._spade_status["fallback_in_use"] = source in {"env", "cache"}
+                if "unable to extract twitch settings url" in lowered or "unable to extract spade_url" in lowered:
+                    self._spade_status["last_error"] = line
 
                 online_match = re.search(r"Streamer\(username=([^,]+),.*\) is Online", line) or re.search(r"([A-Za-z0-9_]+) is Online!?", line)
                 if online_match:
@@ -457,6 +470,7 @@ class RuntimeStatusStore:
                 "errors_count": len(self._errors),
                 "reconnect_count": self._reconnect_count,
                 "streak_counts": self._streak_counts,
+                "spade": dict(self._spade_status),
             }
 
     def streamers(self) -> dict[str, Any]:
@@ -477,6 +491,12 @@ class RuntimeStatusStore:
             self._reconnect_count = 0
             self._streak_counts = {}
             self._last_log_size = 0
+            self._spade_status = {
+                "discovery_source": "unknown",
+                "last_success_at": None,
+                "last_error": None,
+                "fallback_in_use": False,
+            }
 
 
 RUNTIME_STATUS = RuntimeStatusStore()
@@ -931,6 +951,7 @@ pre { background: #0c1019; padding: 12px; border-radius: 8px; max-height: 450px;
 <p>Aktive Streamer: <strong id="active-streamers">-</strong></p>
 <p>Streak-Counts: <strong id="streak-counts">-</strong></p>
 <p>Join-Status: <strong id="join-status">-</strong></p>
+<p>Spade-Discovery: <strong id="spade-discovery">-</strong> | URL vorhanden: <strong id="spade-url-present">-</strong></p>
 <p>Errors: <strong id="error-count">0</strong></p></div>
 <div class="card"><h2>Debug (Live-Log Tail)</h2>
 <div class="button-row"><button type="button" class="button-secondary" onclick="clearDebugState()">Debug + Status clearen</button></div>
@@ -969,6 +990,9 @@ async function refreshApiStatus() {
   const presence = status.streamer_presence || [];
   const presenceText = presence.length ? presence.map(p => `${p.username}:${p.state}`).join(' | ') : '-';
   document.getElementById('join-status').textContent = presenceText;
+  const spade = status.spade || {};
+  document.getElementById('spade-discovery').textContent = spade.discovery_source || 'unknown';
+  document.getElementById('spade-url-present').textContent = spade.current_url_present ? 'ja' : 'nein';
   document.getElementById('miner-state').textContent = miner.state || '-';
   document.getElementById('miner-pid').textContent = miner.pid ? `(PID ${miner.pid})` : '';
   document.getElementById('miner-error').textContent = miner.last_error ? `Letzter Fehler: ${miner.last_error}` : '';
@@ -1237,6 +1261,14 @@ def api_status() -> Any:
     RUNTIME_STATUS.ingest_logs(read_log_tail())
     snapshot = RUNTIME_STATUS.snapshot()
     snapshot["streamer_presence"] = _build_streamer_presence(load_config(), snapshot)
+    spade_cache_path = Path(os.getenv("TWITCH_SPADE_CACHE_PATH", str(Path().absolute() / "cache" / "spade_url.json")))
+    current_spade_url = None
+    if spade_cache_path.exists():
+        try:
+            current_spade_url = json.loads(spade_cache_path.read_text(encoding="utf-8")).get("spade_url")
+        except (OSError, ValueError, TypeError):
+            current_spade_url = None
+    snapshot["spade"]["current_url_present"] = bool(current_spade_url)
     return jsonify(snapshot)
 
 
