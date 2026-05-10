@@ -153,35 +153,49 @@ class Twitch(object):
     def get_spade_url(self, streamer):
         try:
             headers = {"User-Agent": self.user_agent}
-            main_page_request = requests.get(streamer.streamer_url, headers=headers)
+            fallback_spade_url = os.getenv("TWITCH_SPADE_URL", "https://spade.twitch.tv/track")
+            session = self.twitch_login.session
+            main_page_request = session.get(streamer.streamer_url, headers=headers, timeout=15)
             response = main_page_request.text
+            previous_spade_url = streamer.stream.spade_url
+
+            # Fast path: sometimes spade_url is present directly in the page source.
+            direct_spade_match = re.search(r'"spade_url":"(https?:\\?/\\?/[^"]+)"', response)
+            if direct_spade_match:
+                streamer.stream.spade_url = direct_spade_match.group(1).replace("\\/", "/")
+                return
+
             regex_settings = "(https://static.twitchcdn.net/config/settings.*?js)"
             settings_match = re.search(regex_settings, response)
             if settings_match is None:
                 logger.warning(
                     "Unable to extract Twitch settings URL for %s. "
-                    "Skipping spade_url update for this cycle.",
+                    "Using previous or fallback spade_url for this cycle.",
                     streamer.username,
                 )
-                streamer.stream.spade_url = None
+                streamer.stream.spade_url = previous_spade_url or fallback_spade_url
                 return
             settings_url = settings_match.group(1)
 
-            settings_request = requests.get(settings_url, headers=headers)
+            settings_request = session.get(settings_url, headers=headers, timeout=15)
             response = settings_request.text
-            regex_spade = '"spade_url":"(.*?)"'
+            regex_spade = r'"spade_url":"(https?:\\?/\\?/[^"]+)"'
             spade_match = re.search(regex_spade, response)
             if spade_match is None:
                 logger.warning(
                     "Unable to extract spade_url from Twitch settings payload for %s. "
-                    "Skipping spade_url update for this cycle.",
+                    "Using previous or fallback spade_url for this cycle.",
                     streamer.username,
                 )
-                streamer.stream.spade_url = None
+                streamer.stream.spade_url = previous_spade_url or fallback_spade_url
                 return
-            streamer.stream.spade_url = spade_match.group(1)
+            streamer.stream.spade_url = spade_match.group(1).replace("\\/", "/")
+            if not streamer.stream.spade_url:
+                streamer.stream.spade_url = previous_spade_url or fallback_spade_url
         except requests.exceptions.RequestException as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
+            if streamer.stream.spade_url is None:
+                streamer.stream.spade_url = fallback_spade_url
 
     def get_broadcast_id(self, streamer):
         json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
@@ -423,8 +437,18 @@ class Twitch(object):
                     next_iteration = time.time() + 60 / len(streamers_watching)
 
                     try:
+                        spade_url = streamers[index].stream.spade_url
+                        if not spade_url:
+                            logger.warning(
+                                "Skipping minute watched for %s because spade_url is missing.",
+                                streamers[index],
+                            )
+                            self.__chuncked_sleep(
+                                next_iteration - time.time(), chunk_size=chunk_size
+                            )
+                            continue
                         response = requests.post(
-                            streamers[index].stream.spade_url,
+                            spade_url,
                             data=streamers[index].stream.encode_payload(),
                             headers={"User-Agent": self.user_agent},
                             timeout=60,
@@ -481,6 +505,12 @@ class Twitch(object):
                         self.__check_connection_handler(chunk_size)
                     except requests.exceptions.Timeout as e:
                         logger.error(f"Error while trying to send minute watched: {e}")
+                    except requests.exceptions.MissingSchema as e:
+                        logger.warning(
+                            "Skipping minute watched for %s due to invalid spade_url: %s",
+                            streamers[index],
+                            e,
+                        )
 
                     self.__chuncked_sleep(
                         next_iteration - time.time(), chunk_size=chunk_size
