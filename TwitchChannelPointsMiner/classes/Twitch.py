@@ -153,7 +153,9 @@ class Twitch(object):
     def get_spade_url(self, streamer):
         try:
             headers = {"User-Agent": self.user_agent}
-            main_page_request = requests.get(streamer.streamer_url, headers=headers, timeout=15)
+            fallback_spade_url = os.getenv("TWITCH_SPADE_URL", "https://spade.twitch.tv/track")
+            session = self.twitch_login.session
+            main_page_request = session.get(streamer.streamer_url, headers=headers, timeout=15)
             response = main_page_request.text
             previous_spade_url = streamer.stream.spade_url
 
@@ -168,28 +170,32 @@ class Twitch(object):
             if settings_match is None:
                 logger.warning(
                     "Unable to extract Twitch settings URL for %s. "
-                    "Keeping previous spade_url for this cycle.",
+                    "Using previous or fallback spade_url for this cycle.",
                     streamer.username,
                 )
-                streamer.stream.spade_url = previous_spade_url
+                streamer.stream.spade_url = previous_spade_url or fallback_spade_url
                 return
             settings_url = settings_match.group(1)
 
-            settings_request = requests.get(settings_url, headers=headers, timeout=15)
+            settings_request = session.get(settings_url, headers=headers, timeout=15)
             response = settings_request.text
             regex_spade = r'"spade_url":"(https?:\\?/\\?/[^"]+)"'
             spade_match = re.search(regex_spade, response)
             if spade_match is None:
                 logger.warning(
                     "Unable to extract spade_url from Twitch settings payload for %s. "
-                    "Keeping previous spade_url for this cycle.",
+                    "Using previous or fallback spade_url for this cycle.",
                     streamer.username,
                 )
-                streamer.stream.spade_url = previous_spade_url
+                streamer.stream.spade_url = previous_spade_url or fallback_spade_url
                 return
             streamer.stream.spade_url = spade_match.group(1).replace("\\/", "/")
+            if not streamer.stream.spade_url:
+                streamer.stream.spade_url = previous_spade_url or fallback_spade_url
         except requests.exceptions.RequestException as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
+            if streamer.stream.spade_url is None:
+                streamer.stream.spade_url = fallback_spade_url
 
     def get_broadcast_id(self, streamer):
         json_data = copy.deepcopy(GQLOperations.WithIsStreamLiveQuery)
