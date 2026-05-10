@@ -92,11 +92,11 @@ LOGIN_ERROR_EXIT_CODES = {
 def _categorize_login_error(exc):
     message = str(exc).lower()
 
-    if "cookie" in message:
-        return LOGIN_ERROR_CATEGORY_MISSING_COOKIES
-
     if isinstance(exc, BadCredentialsException) or "token" in message or "auth" in message:
         return LOGIN_ERROR_CATEGORY_INVALID_TOKEN
+
+    if "cookie" in message:
+        return LOGIN_ERROR_CATEGORY_MISSING_COOKIES
 
     if isinstance(exc, (RequestException, json.JSONDecodeError, LoginResponseParseException, ValueError)):
         return LOGIN_ERROR_CATEGORY_HTTP_OR_JSON
