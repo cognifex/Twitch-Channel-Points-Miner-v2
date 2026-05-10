@@ -78,9 +78,26 @@ class Twitch(object):
             self.twitch_login.set_token(self.twitch_login.get_auth_token())
             return
 
+        env_auth_token = os.getenv("TWITCH_AUTH_TOKEN", "").strip()
+        if env_auth_token:
+            logger.info("Using TWITCH_AUTH_TOKEN from environment as startup fallback.")
+            self.twitch_login.set_token(env_auth_token)
+            try:
+                if self.twitch_login.check_login():
+                    logger.info("Environment token login successful.")
+                    return
+            except Exception as exc:
+                raise BadCredentialsException(
+                    "TWITCH_AUTH_TOKEN was provided but could not be validated by Twitch. "
+                    "Please refresh the token/cookies."
+                ) from exc
+            raise BadCredentialsException(
+                "TWITCH_AUTH_TOKEN was provided but Twitch rejected it."
+            )
+
         if self.login_mode == "token":
             raise BadCredentialsException(
-                "Token-based login is enabled by default, but no cookie file was found. "
+                "Token-based login is enabled by default, but no cookie file was found and no TWITCH_AUTH_TOKEN was set. "
                 f"Please provide cookies at: {self.cookies_file}"
             )
 
@@ -138,12 +155,30 @@ class Twitch(object):
             main_page_request = requests.get(streamer.streamer_url, headers=headers)
             response = main_page_request.text
             regex_settings = "(https://static.twitchcdn.net/config/settings.*?js)"
-            settings_url = re.search(regex_settings, response).group(1)
+            settings_match = re.search(regex_settings, response)
+            if settings_match is None:
+                logger.warning(
+                    "Unable to extract Twitch settings URL for %s. "
+                    "Skipping spade_url update for this cycle.",
+                    streamer.username,
+                )
+                streamer.stream.spade_url = None
+                return
+            settings_url = settings_match.group(1)
 
             settings_request = requests.get(settings_url, headers=headers)
             response = settings_request.text
             regex_spade = '"spade_url":"(.*?)"'
-            streamer.stream.spade_url = re.search(regex_spade, response).group(1)
+            spade_match = re.search(regex_spade, response)
+            if spade_match is None:
+                logger.warning(
+                    "Unable to extract spade_url from Twitch settings payload for %s. "
+                    "Skipping spade_url update for this cycle.",
+                    streamer.username,
+                )
+                streamer.stream.spade_url = None
+                return
+            streamer.stream.spade_url = spade_match.group(1)
         except requests.exceptions.RequestException as e:
             logger.error(f"Something went wrong during extraction of 'spade_url': {e}")
 
