@@ -158,7 +158,7 @@ class Twitch(object):
             previous_spade_url = streamer.stream.spade_url
 
             # Fast path: sometimes spade_url is present directly in the page source.
-            direct_spade_match = re.search(r'"spade_url":"(https?:\\\\?/\\\\?/[^"]+)"', response)
+            direct_spade_match = re.search(r'"spade_url":"(https?:\\?/\\?/[^"]+)"', response)
             if direct_spade_match:
                 streamer.stream.spade_url = direct_spade_match.group(1).replace("\\/", "/")
                 return
@@ -177,7 +177,7 @@ class Twitch(object):
 
             settings_request = requests.get(settings_url, headers=headers, timeout=15)
             response = settings_request.text
-            regex_spade = '"spade_url":"(https?:\\\\?/\\\\?/.*?)"'
+            regex_spade = r'"spade_url":"(https?:\\?/\\?/[^"]+)"'
             spade_match = re.search(regex_spade, response)
             if spade_match is None:
                 logger.warning(
@@ -436,6 +436,9 @@ class Twitch(object):
                             logger.warning(
                                 "Skipping minute watched for %s because spade_url is missing.",
                                 streamers[index],
+                            )
+                            self.__chuncked_sleep(
+                                next_iteration - time.time(), chunk_size=chunk_size
                             )
                             continue
                         response = requests.post(
