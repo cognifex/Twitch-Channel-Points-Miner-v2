@@ -186,7 +186,7 @@ def configure_loggers(username, settings):
     )
 
     if settings.save is True:
-        logs_path = os.path.join(Path().absolute(), "logs")
+        logs_path = os.getenv("TCPM_LOGS_DIR", "").strip() or os.path.join(Path().absolute(), "logs")
         Path(logs_path).mkdir(parents=True, exist_ok=True)
         if settings.auto_clear is True:
             logs_file = os.path.join(
